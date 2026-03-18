@@ -9,7 +9,8 @@
 #include <QToolBar>
 #include <QMessageBox>
 #include <QKeyEvent>
-#include "DeviceChannelWidget.h" // 引用你的通道组件头文件
+#include <QElapsedTimer>
+#include "DeviceChannelWidget.h"
 
 class MainWindow : public QMainWindow
 {
@@ -23,25 +24,20 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
 
 private slots:
-    // [核心槽函数] 当通道数量设置改变时触发
     void onChannelCountChanged(int count);
-    // [新增槽函数] 处理通道内部扫码完毕后的光标跳转
     void onChannelScanFinished(int currentId);
-    // [新增] 处理通道被清空后的焦点重分配
-    void onChannelCleared();
+    void onChannelCleared(bool isGlobal); // [修改] 增加判定参数
 
 private:
-    QWidget *m_centralWidget;      // 中心部件
-    QGridLayout *m_gridLayout;     // 网格布局管理器
+    QWidget *m_centralWidget;
+    QGridLayout *m_gridLayout;
 
-    // [核心容器] 存储当前所有活跃的通道对象指针
     QList<DeviceChannelWidget*> m_channels;
 
-    // 顶部工具栏控件
-    QSpinBox *m_spinBoxCount;      // 用于设置通道数量
+    QSpinBox *m_spinBoxCount;
 
-    // [新增] 扫码枪输入缓存
     QString m_scanBuffer;
+    QElapsedTimer m_scanTimer; // [新增] 用于防抖处理断帧的乱码
 };
 
 #endif // MAINWINDOW_H

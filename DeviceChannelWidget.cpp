@@ -15,10 +15,9 @@ DeviceChannelWidget::DeviceChannelWidget(int id, QWidget *parent)
     setupUi();
 }
 
-// ====================================================================
-// 1. 界面构建
-// ====================================================================
 void DeviceChannelWidget::setupUi() {
+    // [新增] 实例化自动重连定时器
+    m_reconnectTimer = new QTimer(this);
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(2, 2, 2, 2);
     mainLayout->setSpacing(2);
@@ -30,7 +29,6 @@ void DeviceChannelWidget::setupUi() {
     groupLayout->setContentsMargins(4, 6, 4, 4);
     groupLayout->setSpacing(4);
 
-    // --- A. 顶部控制栏 ---
     QHBoxLayout *topLayout = new QHBoxLayout();
 
     m_cbModel = new QComboBox();
@@ -41,7 +39,7 @@ void DeviceChannelWidget::setupUi() {
     } else {
         m_cbModel->addItems(configFiles);
         m_cbModel->setCurrentIndex(0);
-        ConfigManager::instance().loadConfig(m_cbModel->currentText());
+        m_config.loadConfig(m_cbModel->currentText()); // 使用本地配置
     }
     m_cbModel->setMaximumWidth(100);
 
@@ -54,32 +52,23 @@ void DeviceChannelWidget::setupUi() {
     m_cbBaud->addItems({"9600", "115200","460800", "921600"});
     m_cbBaud->setCurrentText("115200");
     m_cbBaud->setMaximumWidth(70);
-    // ========================================================
-    // [新增] 从本地 settings.ini 读取当前通道的历史配置
-    // ========================================================
-    QSettings settings("settings.ini", QSettings::IniFormat);
 
-    // 1. 恢复机型配置
+    QSettings settings("settings.ini", QSettings::IniFormat);
     QString savedModel = settings.value(QString("Channel_%1/Model").arg(m_id)).toString();
     if (!savedModel.isEmpty()) {
         int idx = m_cbModel->findText(savedModel);
         if (idx >= 0) m_cbModel->setCurrentIndex(idx);
     }
-
-    // 2. 恢复串口号 (如果上次保存的串口当前没插上，findText 会返回 -1，安全跳过)
     QString savedPort = settings.value(QString("Channel_%1/Port").arg(m_id)).toString();
     if (!savedPort.isEmpty()) {
         int idx = m_cbPort->findText(savedPort);
         if (idx >= 0) m_cbPort->setCurrentIndex(idx);
     }
-
-    // 3. 恢复波特率
     QString savedBaud = settings.value(QString("Channel_%1/Baud").arg(m_id)).toString();
     if (!savedBaud.isEmpty()) {
         int idx = m_cbBaud->findText(savedBaud);
         if (idx >= 0) m_cbBaud->setCurrentIndex(idx);
     }
-    // ========================================================
 
     QPushButton *btnStart = new QPushButton("开启");
     QPushButton *btnStop = new QPushButton("停止");
@@ -101,7 +90,6 @@ void DeviceChannelWidget::setupUi() {
     topLayout->addWidget(btnClear);
     topLayout->addStretch();
 
-    // --- B. 身份比对区 (两行) ---
     QGridLayout *compareLayout = new QGridLayout();
     compareLayout->setContentsMargins(0, 0, 0, 0);
     compareLayout->setSpacing(4);
@@ -125,7 +113,6 @@ void DeviceChannelWidget::setupUi() {
     compareLayout->addWidget(lblRead, 1, 0);
     compareLayout->addWidget(m_editSerialRead, 1, 1);
 
-    // --- C. 结果表格 (8列) ---
     m_tableRes = new QTableWidget();
     m_tableRes->setColumnCount(8);
     m_tableRes->setHorizontalHeaderLabels({"项", "值", "项", "值", "项", "值", "项", "值"});
@@ -139,7 +126,6 @@ void DeviceChannelWidget::setupUi() {
     m_tableRes->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     m_tableRes->verticalHeader()->setDefaultSectionSize(26);
 
-    // --- D. 日志窗口 (大容量) ---
     m_logView = new QPlainTextEdit();
     m_logView->setReadOnly(true);
     m_logView->setMinimumHeight(60);
@@ -147,73 +133,58 @@ void DeviceChannelWidget::setupUi() {
     m_logView->setFont(QFont("Consolas", 9));
     m_logView->setMaximumBlockCount(3000);
 
-    // --- E. 组装 ---
     groupLayout->addLayout(topLayout);
     groupLayout->addLayout(compareLayout);
     groupLayout->addWidget(m_tableRes);
     groupLayout->addWidget(m_logView);
     mainLayout->addWidget(m_group);
 
-    //========================================================
-        // [新增防呆设计] 剥夺所有非核心控件的键盘焦点！
-        // 确保无论工人鼠标怎么乱点，扫码枪的输入永远不会被这些控件吞掉
-        // ========================================================
+    // Kiosk 防呆
     m_cbModel->setFocusPolicy(Qt::NoFocus);
     m_cbPort->setFocusPolicy(Qt::NoFocus);
     m_cbBaud->setFocusPolicy(Qt::NoFocus);
-
-    // 按钮只能用鼠标点，不能用空格/回车键触发
     btnStart->setFocusPolicy(Qt::NoFocus);
     btnStop->setFocusPolicy(Qt::NoFocus);
     btnClear->setFocusPolicy(Qt::NoFocus);
-
-    // 只读框、表格、日志区严禁获取光标
     m_editSerialRead->setFocusPolicy(Qt::NoFocus);
     m_tableRes->setFocusPolicy(Qt::NoFocus);
     m_logView->setFocusPolicy(Qt::NoFocus);
-    // ========================================================
 
-    // --- F. 信号 ---
+    //信号
     connect(btnStart, &QPushButton::clicked, this, &DeviceChannelWidget::onStartClicked);
     connect(btnStop, &QPushButton::clicked, this, &DeviceChannelWidget::onStopClicked);
     connect(m_serial, &QSerialPort::readyRead, this, &DeviceChannelWidget::onSerialReadyRead);
     connect(m_editBarcode, &QLineEdit::textChanged, this, &DeviceChannelWidget::onBarcodeChanged);
-    // [新增代码] 捕获扫码枪扫完自带的“回车键”，向外发送跳转信号
     connect(m_editBarcode, &QLineEdit::returnPressed, this, [=](){
         emit barcodeReturnPressed(m_id);
     });
+    // ================= [新增] =================
+    // 监听串口底层错误（如 USB 被拔出）
+    connect(m_serial, &QSerialPort::errorOccurred, this, &DeviceChannelWidget::onSerialError);
+    // 监听定时器，执行重连动作
+    connect(m_reconnectTimer, &QTimer::timeout, this, &DeviceChannelWidget::tryReconnect);
+    // ==========================================
 
-    // ========================================================
-    // [修改与新增] 实时监听用户的下拉选择，并立刻保存到本地
-    // ========================================================
-
-    // 1. 监听机型切换
     connect(m_cbModel, &QComboBox::currentTextChanged, this, [=](const QString &fileName){
         if (fileName.isEmpty() || fileName == "默认配置") return;
-
-        // 保存配置
         QSettings settings("settings.ini", QSettings::IniFormat);
         settings.setValue(QString("Channel_%1/Model").arg(m_id), fileName);
-
         m_logView->appendPlainText(QString(">>> Load: %1").arg(fileName));
-        ConfigManager::instance().loadConfig(fileName);
+        m_config.loadConfig(fileName); // 使用本地配置
         resetUI();
     });
 
-    // 2. 监听串口号切换
     connect(m_cbPort, &QComboBox::currentTextChanged, this, [=](const QString &portName){
         if(portName.isEmpty()) return;
         QSettings settings("settings.ini", QSettings::IniFormat);
         settings.setValue(QString("Channel_%1/Port").arg(m_id), portName);
     });
 
-    // 3. 监听波特率切换
     connect(m_cbBaud, &QComboBox::currentTextChanged, this, [=](const QString &baudRate){
         if(baudRate.isEmpty()) return;
         QSettings settings("settings.ini", QSettings::IniFormat);
         settings.setValue(QString("Channel_%1/Baud").arg(m_id), baudRate);
     });
-    // ========================================================
 
     connect(btnClear, &QPushButton::clicked, this, [=](){
         m_buffer.clear();
@@ -222,15 +193,12 @@ void DeviceChannelWidget::setupUi() {
     });
 }
 
-// ====================================================================
-// 2. 界面重置
-// ====================================================================
 void DeviceChannelWidget::resetUI() {
     m_currentIds.clear();
     m_editSerialRead->clear();
     m_editSerialRead->setStyleSheet("background-color: #F0F0F0; color: #555;");
 
-    auto teleRules = ConfigManager::instance().getTelemetryRules();
+    auto teleRules = m_config.getTelemetryRules();
     int rows = (teleRules.size() + 3) / 4;
 
     m_tableRes->clear();
@@ -261,30 +229,48 @@ void DeviceChannelWidget::resetUI() {
     setChannelStatus(true);
 
     if(m_editBarcode) {
-        m_editBarcode->clear();      // [新增] 彻底清空里面的文字
-        emit barcodeCleared(); // [新增] 发送求助信号，让主窗口来分配焦点
+        m_editBarcode->clear();
+        emit barcodeCleared(true); // 任何触发重置的情况，发送全局清空请求
     }
 }
 
-// ====================================================================
-// 3. 串口数据处理
-// ====================================================================
 void DeviceChannelWidget::onSerialReadyRead() {
     QByteArray data = m_serial->readAll();
 
-    // ========================================================
-    // [新增] 实时写入文件
-    // ========================================================
+    // [优化] 跨天日志切割判定
     if (m_logFile && m_logFile->isOpen()) {
-        m_logFile->write(data);
-        m_logFile->flush(); // 立即刷新，防止程序崩溃数据丢失
+        QDate currentDate = QDate::currentDate();
+        if (currentDate != m_logDate) {
+            m_logFile->close();
+            delete m_logFile;
+
+            QString dirPath = QString("Logs/%1").arg(currentDate.toString("yyyyMMdd"));
+            QDir().mkpath(dirPath);
+            QString fileName = QString("%1/Ch%2_%3.txt").arg(dirPath).arg(m_id).arg(QDateTime::currentDateTime().toString("HHmmss"));
+            m_logFile = new QFile(fileName);
+            if (m_logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+                m_logDate = currentDate;
+                m_logView->appendPlainText(">>> [New Day Log Rotation]");
+            }
+        }
+
+        if (m_logFile->isOpen()) {
+            m_logFile->write(data);
+            m_logFile->flush();
+        }
     }
-    // ========================================================
 
     m_buffer.append(data);
 
-    // 防止缓存爆炸 (保留最近 20KB)
-    if(m_buffer.size() > 20480) m_buffer.clear();
+    // [优化] 防止极端溢出截断有效数据
+    if(m_buffer.size() > 20480) {
+        int lastIdx = m_buffer.lastIndexOf('\n');
+        if(lastIdx != -1) {
+            m_buffer.remove(0, lastIdx + 1); // 保留最后一个换行符之后的残余数据
+        } else {
+            m_buffer.clear(); // 真的全是乱码，直接清空
+        }
+    }
 
     processBuffer();
 }
@@ -302,50 +288,32 @@ void DeviceChannelWidget::processBuffer() {
     }
 }
 
-// ====================================================================
-// 4. 核心解析逻辑 (修复重复重置BUG)
-// ====================================================================
 void DeviceChannelWidget::parseLine(const QString &line) {
     if(!m_isTesting) return;
 
-    // A. 遥测数据
     if(line.contains("$info,")) {
         int start = line.indexOf("$info,");
         parseTelemetry(line.mid(start + 6));
         return;
     }
 
-    // B. JSON
-    if (line.trimmed().startsWith("@") && line.trimmed().endsWith("#")) {
-        // (省略 JSON 解析代码，此处只负责填表，不负责Reset)
-        // 您可以保留原来的 JSON 解析逻辑用于填 ID
-        return;
-    }
+    if (line.trimmed().startsWith("@") && line.trimmed().endsWith("#")) return;
 
-    // C. 标准文本 (核心修复点)
     const QStringList parts = line.split(' ', Qt::SkipEmptyParts);
     bool needCompare = false;
 
-    const auto idRules = ConfigManager::instance().getIdentityRules();
+    const auto idRules = m_config.getIdentityRules();
 
     for (const QString& part : parts) {
         for(const auto& rule : idRules) {
             if(part.startsWith(rule.prefix, Qt::CaseInsensitive)) {
                 QString deviceVal = part.mid(rule.prefix.length()).trimmed();
-
-                // =======================================================
-                // [关键修复 1] 只有 IMEI 才有资格触发重置
-                // 强制忽略 IMSI、MAC 等触发的重置，防止第二波数据清空第一波
-                // =======================================================
                 bool isAuthority = (rule.key.compare("imei", Qt::CaseInsensitive) == 0);
 
                 if (isAuthority && !deviceVal.isEmpty()) {
                     QString currentVal = m_currentIds.value(rule.key);
                     qint64 now = QDateTime::currentMSecsSinceEpoch();
-
                     bool isNew = (currentVal != deviceVal);
-                    // [关键修复 2] 将防抖时间延长到 8000ms
-                    // 只要 8 秒内收到相同的 IMEI，都视为同一波数据，坚决不重置
                     bool isRetest = (now - m_lastResetTime > 8000);
 
                     if (isNew || isRetest) {
@@ -355,28 +323,21 @@ void DeviceChannelWidget::parseLine(const QString &line) {
                     }
                 }
 
-                // 无论是否重置，都更新数据到 Map 和界面
                 m_currentIds.insert(rule.key, deviceVal);
                 updateSerialDisplay();
-
                 break;
             }
         }
     }
-
     if(needCompare) performComparison();
 }
 
-// ====================================================================
-// 5. 动态显示与比对
-// ====================================================================
 void DeviceChannelWidget::updateSerialDisplay() {
     QStringList displayParts;
-    const auto idRules = ConfigManager::instance().getIdentityRules();
+    const auto idRules = m_config.getIdentityRules();
 
     for(const auto& rule : idRules) {
         if(m_currentIds.contains(rule.key)) {
-            // 拼凑字符串，高效写法
             displayParts << QString("%1:%2").arg(rule.key.toUpper(), m_currentIds[rule.key]);
         }
     }
@@ -401,14 +362,10 @@ void DeviceChannelWidget::onBarcodeChanged(const QString &text) {
     updateSerialDisplay();
 }
 
-// ====================================================================
-// 6. 辅助函数
-// ====================================================================
 void DeviceChannelWidget::onStartClicked() {
-    // 1. 先关闭旧的（如果有）
+    m_reconnectTimer->stop(); // [新增] 点击开启时，先停掉可能存在的重连定时器
     if(m_serial->isOpen()) m_serial->close();
 
-    // 关闭旧日志文件
     if(m_logFile) {
         if(m_logFile->isOpen()) m_logFile->close();
         delete m_logFile;
@@ -422,56 +379,39 @@ void DeviceChannelWidget::onStartClicked() {
         m_isTesting = true;
         m_logView->appendPlainText("--- 端口已打开 ---");
 
-        // ========================================================
-        // [新增] 创建日志文件逻辑
-        // 路径格式: Logs/20260114/Ch1_123045.txt
-        // ========================================================
-        QString dirPath = QString("Logs/%1").arg(QDate::currentDate().toString("yyyyMMdd"));
-        QDir dir;
-        if(!dir.exists(dirPath)) dir.mkpath(dirPath); // 自动创建目录
+        m_logDate = QDate::currentDate(); // 记录开启日期
+        QString dirPath = QString("Logs/%1").arg(m_logDate.toString("yyyyMMdd"));
+        QDir().mkpath(dirPath);
 
-        QString fileName = QString("%1/Ch%2_%3.txt")
-                               .arg(dirPath)
-                               .arg(m_id)
-                               .arg(QDateTime::currentDateTime().toString("HHmmss"));
-
+        QString fileName = QString("%1/Ch%2_%3.txt").arg(dirPath).arg(m_id).arg(QDateTime::currentDateTime().toString("HHmmss"));
         m_logFile = new QFile(fileName);
         if(m_logFile->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
             m_logView->appendPlainText(QString(">>> Log: %1").arg(fileName));
-        } else {
-            m_logView->appendPlainText(">>> Warning: 创建日志文件失败!");
         }
-        // ========================================================
-
         resetUI();
     } else {
         m_logView->appendPlainText("错误: 打开串口失败!");
     }
 }
 
-// 停止按钮
 void DeviceChannelWidget::onStopClicked() {
+    m_reconnectTimer->stop(); // [新增] 用户主动点击停止，彻底放弃重连尝试
     if(m_serial->isOpen()) {
         m_serial->close();
         m_isTesting = false;
         m_logView->appendPlainText("--- 端口已关闭 ---");
 
-        // [新增] 关闭文件
         if(m_logFile) {
             if(m_logFile->isOpen()) m_logFile->close();
             delete m_logFile;
             m_logFile = nullptr;
         }
-
         setChannelStatus(true);
     }
 }
 
-// 析构函数
 DeviceChannelWidget::~DeviceChannelWidget() {
     if (m_serial->isOpen()) m_serial->close();
-
-    // [新增] 安全关闭文件
     if (m_logFile) {
         if (m_logFile->isOpen()) m_logFile->close();
         delete m_logFile;
@@ -487,7 +427,7 @@ void DeviceChannelWidget::updateResultItem(const QString &key, const QString &va
     QTableWidgetItem *item = m_tableRes->item(row, col);
     if(!item) return;
 
-    auto rules = ConfigManager::instance().getTelemetryRules();
+    auto rules = m_config.getTelemetryRules();
     if(index >= rules.size()) return;
     TestRule rule = rules[index];
 
@@ -519,13 +459,11 @@ void DeviceChannelWidget::updateResultItem(const QString &key, const QString &va
 }
 
 void DeviceChannelWidget::performComparison() {
-    // 简单示例：遍历所有结果，如果有 NG 则变红
     bool allPass = true;
     for(int i=0; i<m_tableRes->rowCount(); i++) {
-        for(int j=1; j<8; j+=2) { // 检查值所在的列
+        for(int j=1; j<8; j+=2) {
             QTableWidgetItem *item = m_tableRes->item(i, j);
             if(item && (item->text().startsWith("NG") || item->text() == "WAIT")) {
-                // 注意：这里WAIT可能意味着还没测完，暂不算失败，根据需求调整
                 if(item->text().startsWith("NG")) allPass = false;
             }
         }
@@ -539,84 +477,110 @@ void DeviceChannelWidget::setChannelStatus(bool active) {
 }
 
 void DeviceChannelWidget::parseTelemetry(const QString &dataPart) {
-    // 原始数据示例: "... v:4.211,t:0.776,35,pwr:1 ..."
-
-    // 1. 先按逗号粗暴分割
-    // 结果变成 list: ["v:4.211", "t:0.776", "35", "pwr:1"]
     const QStringList parts = dataPart.split(',', Qt::SkipEmptyParts);
-
-    bool isNextT2 = false; // 标记位：下一个纯数字是否为 t2
+    bool isNextT2 = false;
     bool anyUpdate = false;
 
     for(const QString &part : parts) {
         QString cleanPart = part.trimmed();
-
-        // --- 情况 A: 标准的 key:value (例如 t:0.776) ---
         if(cleanPart.contains(':')) {
             QStringList kv = cleanPart.split(':');
             if(kv.size() == 2) {
                 QString key = kv[0].trimmed();
                 QString val = kv[1].trimmed();
-
-                // [特殊处理] 如果检测到 key 是 "t"
                 if(key.compare("t", Qt::CaseInsensitive) == 0) {
-                    // 1. 把前半部分(0.776) 映射给 "t1"
                     updateResultItem("t1", val);
-
-                    // 2. 标记：下一个没有冒号的数字，就是 "t2"
                     isNextT2 = true;
-                }
-                else {
-                    // 其他普通项 (v, pwr, mac...)
+                } else {
                     updateResultItem(key, val);
-                    isNextT2 = false; // 重置标记
+                    isNextT2 = false;
                 }
                 anyUpdate = true;
             }
-        }
-        // --- 情况 B: 没有冒号的纯数值 (例如 35) ---
-        else if(!cleanPart.isEmpty()) {
-            // 如果上一个项是 t，那这个项肯定是 t2
+        } else if(!cleanPart.isEmpty()) {
             if(isNextT2) {
                 updateResultItem("t2", cleanPart);
-                isNextT2 = false; // 用完即焚，防止误判
+                isNextT2 = false;
                 anyUpdate = true;
             }
         }
     }
-
     if(anyUpdate) performComparison();
 }
 
 ScanResult DeviceChannelWidget::checkScanInput(const QString &code) {
     QString mySerialData = m_editSerialRead->text().trimmed();
 
-    // 情况 A: 还没有串口数据，或者没开机
     if(mySerialData.isEmpty()) {
-        // 如果光标在这个框里，用户非要扫，那就先把码填进去，显示灰色等待
         if(m_editBarcode->hasFocus()) {
             m_editBarcode->setText(code);
-            return ScanResult::Mismatch; // 暂时算错，或者你可以定义一个 Wait 状态
+            return ScanResult::Mismatch;
         }
         return ScanResult::Ignore;
     }
 
-    // 情况 B: 完美匹配 (Auto-Routing)
-    // 逻辑：不管光标在不在我这，只要码对上了，我就认领
-    if(code == mySerialData) { // 或者 contains
+    if(code == mySerialData) {
         m_editBarcode->setText(code);
-        updateSerialDisplay(); // 触发变绿
+        updateSerialDisplay();
         return ScanResult::Match;
     }
 
-    // 情况 C: 不匹配，但是光标在我这里 (Focus Trap)
-    // 逻辑：光标在我这，说明用户就是在测我，但是扫错了 -> 判 NG
     if(m_editBarcode->hasFocus()) {
         m_editBarcode->setText(code);
-        updateSerialDisplay(); // 触发变红
+        updateSerialDisplay();
         return ScanResult::Mismatch;
     }
-
-    // 情况 D: 既不匹配，光标也不在我这 -> 跟我无关
     return ScanResult::Ignore;
+}
+
+// ====================================================================
+// [新增逻辑] 拦截串口异常底层信号
+// ====================================================================
+void DeviceChannelWidget::onSerialError(QSerialPort::SerialPortError error) {
+    // ResourceError 通常代表设备被意外移除 (如 USB 线被拔掉)
+    if (error == QSerialPort::ResourceError) {
+        if (m_serial->isOpen()) {
+            m_serial->close(); // 安全关闭已失效的句柄
+        }
+
+        m_logView->appendPlainText(QString("\n>>> 警告: 串口[%1]意外断开，正在尝试重连...").arg(m_cbPort->currentText()));
+        setChannelStatus(false); // 界面边框变红提示工人
+
+        // 只要用户没有主动点“停止”(m_isTesting 仍为 true)，就启动重连机制
+        if (m_isTesting) {
+            m_reconnectTimer->start(2000); // 每隔 2 秒尝试重连一次
+        }
+    }
+}
+
+// ====================================================================
+// [新增逻辑] 定时轮询重连
+// ====================================================================
+void DeviceChannelWidget::tryReconnect() {
+    if (!m_isTesting) {
+        m_reconnectTimer->stop();
+        return;
+    }
+
+    // 1. 先检查物理层面上，这个 COM 口是不是已经插回来了
+    bool portExists = false;
+    const auto ports = QSerialPortInfo::availablePorts();
+    for (const auto &info : ports) {
+        if (info.portName() == m_cbPort->currentText()) {
+            portExists = true;
+            break;
+        }
+    }
+
+    // 2. 如果设备插回来了，尝试打开它
+    if (portExists) {
+        m_serial->setPortName(m_cbPort->currentText());
+        if (m_serial->open(QIODevice::ReadWrite)) {
+            m_reconnectTimer->stop(); // 重连成功，关闭定时器
+            m_logView->appendPlainText(">>> 自动重连成功! 继续测试...");
+            setChannelStatus(true);   // 界面边框恢复绿色
+
+            // 注意：这里不需要调用 resetUI()，这样掉线前没测完的数据可以接着测
+        }
+    }
 }
