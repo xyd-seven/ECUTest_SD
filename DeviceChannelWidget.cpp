@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QDebug>
 #include <QDateTime>
+#include <QSettings>
 
 DeviceChannelWidget::DeviceChannelWidget(int id, QWidget *parent)
     : QWidget(parent), m_id(id)
@@ -53,6 +54,32 @@ void DeviceChannelWidget::setupUi() {
     m_cbBaud->addItems({"9600", "115200","460800", "921600"});
     m_cbBaud->setCurrentText("115200");
     m_cbBaud->setMaximumWidth(70);
+    // ========================================================
+    // [新增] 从本地 settings.ini 读取当前通道的历史配置
+    // ========================================================
+    QSettings settings("settings.ini", QSettings::IniFormat);
+
+    // 1. 恢复机型配置
+    QString savedModel = settings.value(QString("Channel_%1/Model").arg(m_id)).toString();
+    if (!savedModel.isEmpty()) {
+        int idx = m_cbModel->findText(savedModel);
+        if (idx >= 0) m_cbModel->setCurrentIndex(idx);
+    }
+
+    // 2. 恢复串口号 (如果上次保存的串口当前没插上，findText 会返回 -1，安全跳过)
+    QString savedPort = settings.value(QString("Channel_%1/Port").arg(m_id)).toString();
+    if (!savedPort.isEmpty()) {
+        int idx = m_cbPort->findText(savedPort);
+        if (idx >= 0) m_cbPort->setCurrentIndex(idx);
+    }
+
+    // 3. 恢复波特率
+    QString savedBaud = settings.value(QString("Channel_%1/Baud").arg(m_id)).toString();
+    if (!savedBaud.isEmpty()) {
+        int idx = m_cbBaud->findText(savedBaud);
+        if (idx >= 0) m_cbBaud->setCurrentIndex(idx);
+    }
+    // ========================================================
 
     QPushButton *btnStart = new QPushButton("开启");
     QPushButton *btnStop = new QPushButton("停止");
@@ -127,18 +154,66 @@ void DeviceChannelWidget::setupUi() {
     groupLayout->addWidget(m_logView);
     mainLayout->addWidget(m_group);
 
+    //========================================================
+        // [新增防呆设计] 剥夺所有非核心控件的键盘焦点！
+        // 确保无论工人鼠标怎么乱点，扫码枪的输入永远不会被这些控件吞掉
+        // ========================================================
+    m_cbModel->setFocusPolicy(Qt::NoFocus);
+    m_cbPort->setFocusPolicy(Qt::NoFocus);
+    m_cbBaud->setFocusPolicy(Qt::NoFocus);
+
+    // 按钮只能用鼠标点，不能用空格/回车键触发
+    btnStart->setFocusPolicy(Qt::NoFocus);
+    btnStop->setFocusPolicy(Qt::NoFocus);
+    btnClear->setFocusPolicy(Qt::NoFocus);
+
+    // 只读框、表格、日志区严禁获取光标
+    m_editSerialRead->setFocusPolicy(Qt::NoFocus);
+    m_tableRes->setFocusPolicy(Qt::NoFocus);
+    m_logView->setFocusPolicy(Qt::NoFocus);
+    // ========================================================
+
     // --- F. 信号 ---
     connect(btnStart, &QPushButton::clicked, this, &DeviceChannelWidget::onStartClicked);
     connect(btnStop, &QPushButton::clicked, this, &DeviceChannelWidget::onStopClicked);
     connect(m_serial, &QSerialPort::readyRead, this, &DeviceChannelWidget::onSerialReadyRead);
     connect(m_editBarcode, &QLineEdit::textChanged, this, &DeviceChannelWidget::onBarcodeChanged);
+    // [新增代码] 捕获扫码枪扫完自带的“回车键”，向外发送跳转信号
+    connect(m_editBarcode, &QLineEdit::returnPressed, this, [=](){
+        emit barcodeReturnPressed(m_id);
+    });
 
+    // ========================================================
+    // [修改与新增] 实时监听用户的下拉选择，并立刻保存到本地
+    // ========================================================
+
+    // 1. 监听机型切换
     connect(m_cbModel, &QComboBox::currentTextChanged, this, [=](const QString &fileName){
         if (fileName.isEmpty() || fileName == "默认配置") return;
+
+        // 保存配置
+        QSettings settings("settings.ini", QSettings::IniFormat);
+        settings.setValue(QString("Channel_%1/Model").arg(m_id), fileName);
+
         m_logView->appendPlainText(QString(">>> Load: %1").arg(fileName));
         ConfigManager::instance().loadConfig(fileName);
         resetUI();
     });
+
+    // 2. 监听串口号切换
+    connect(m_cbPort, &QComboBox::currentTextChanged, this, [=](const QString &portName){
+        if(portName.isEmpty()) return;
+        QSettings settings("settings.ini", QSettings::IniFormat);
+        settings.setValue(QString("Channel_%1/Port").arg(m_id), portName);
+    });
+
+    // 3. 监听波特率切换
+    connect(m_cbBaud, &QComboBox::currentTextChanged, this, [=](const QString &baudRate){
+        if(baudRate.isEmpty()) return;
+        QSettings settings("settings.ini", QSettings::IniFormat);
+        settings.setValue(QString("Channel_%1/Baud").arg(m_id), baudRate);
+    });
+    // ========================================================
 
     connect(btnClear, &QPushButton::clicked, this, [=](){
         m_buffer.clear();
@@ -186,8 +261,8 @@ void DeviceChannelWidget::resetUI() {
     setChannelStatus(true);
 
     if(m_editBarcode) {
-        m_editBarcode->setFocus();
-        m_editBarcode->selectAll();
+        m_editBarcode->clear();      // [新增] 彻底清空里面的文字
+        emit barcodeCleared(); // [新增] 发送求助信号，让主窗口来分配焦点
     }
 }
 

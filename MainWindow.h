@@ -25,6 +25,10 @@ protected:
 private slots:
     // [核心槽函数] 当通道数量设置改变时触发
     void onChannelCountChanged(int count);
+    // [新增槽函数] 处理通道内部扫码完毕后的光标跳转
+    void onChannelScanFinished(int currentId);
+    // [新增] 处理通道被清空后的焦点重分配
+    void onChannelCleared();
 
 private:
     QWidget *m_centralWidget;      // 中心部件

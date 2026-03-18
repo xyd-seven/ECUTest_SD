@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include <cmath> //用于计算平方根 ceil/sqrt
 #include <QtGlobal>
+#include <QTimer>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -28,9 +29,11 @@ MainWindow::MainWindow(QWidget *parent)
     // [设置控件] 数字微调框 (范围 1 ~ 9)
     m_spinBoxCount = new QSpinBox(this);
     m_spinBoxCount->setRange(1, 9);
-    m_spinBoxCount->setValue(4);    // 默认启动时为 4 通道
+    m_spinBoxCount->setValue(2);    // 默认启动时为 4 通道
     m_spinBoxCount->setFont(QFont("Arial", 10));
     m_spinBoxCount->setMinimumWidth(80);
+    // [新增] 禁止微调框获取键盘焦点 (只能用鼠标点上下箭头修改通道数)
+    m_spinBoxCount->setFocusPolicy(Qt::NoFocus);
     toolbar->addWidget(m_spinBoxCount);
 
     // 4. 连接信号: 当数字改变时，执行重建逻辑
@@ -39,7 +42,7 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::onChannelCountChanged);
 
     // 5. 初始化默认界面
-    onChannelCountChanged(4);
+    onChannelCountChanged(2);
 }
 
 MainWindow::~MainWindow()
@@ -99,6 +102,11 @@ void MainWindow::onChannelCountChanged(int count)
         // 1. 创建新对象 (ID 从 1 开始)
         DeviceChannelWidget *w = new DeviceChannelWidget(i + 1, this);
 
+        // [新增代码] 监听通道内的扫码回车动作
+        connect(w, &DeviceChannelWidget::barcodeReturnPressed, this, &MainWindow::onChannelScanFinished);
+        // [新增] 监听通道被清空的信号
+        connect(w, &DeviceChannelWidget::barcodeCleared, this, &MainWindow::onChannelCleared);
+
         // 2. 存入列表管理
         m_channels.append(w);
 
@@ -112,6 +120,15 @@ void MainWindow::onChannelCountChanged(int count)
 
     // --- D. 恢复界面更新 ---
     setUpdatesEnabled(true);
+    // [新增保险1]：每次重建网格后，强制让第 1 个通道获取焦点
+    if (!m_channels.isEmpty()) {
+        // 使用一个极短的延时，确保 UI 渲染完成后再抢夺焦点
+        QTimer::singleShot(50, this, [=]() {
+            if (m_channels[0]->isBarcodeEmpty()) {
+                m_channels[0]->setFocusToBarcode();
+            }
+        });
+    }
 }
 
 void MainWindow::keyPressEvent(QKeyEvent *event) {
@@ -140,17 +157,90 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
 
     // 2. 第二轮遍历：寻找【焦点持有者】
     // 如果没有完美匹配，检查用户当前鼠标是不是点在某个框里
-    for(auto channel : qAsConst(m_channels)) {
+    for(int i = 0; i < m_channels.size(); ++i) {
+        auto channel = m_channels[i];
         if(channel->hasFocusInBar()) {
-            // 强行把这个错码塞给这个通道，让它变红报错
-            channel->checkScanInput(code);
-            // 可以在这里加个失败报警音
+            channel->checkScanInput(code); // 强塞给这个通道
+
+            // 【核心修复】：扫码填入后，自动把光标跳到下一个“还为空”的通道
+            for(int j = 1; j < m_channels.size(); ++j) {
+                int nextIdx = (i + j) % m_channels.size();
+                if(m_channels[nextIdx]->isBarcodeEmpty()) {
+                    m_channels[nextIdx]->setFocusToBarcode(); // 焦点顺延
+                    break;
+                }
+            }
             return;
         }
     }
 
-    // 3. 第三轮：全局孤儿警告
+    // 3. 第三轮(新增体验优化)：如果都没匹配，工人也没有鼠标点击任何框
+    // 智能降级：自动寻找顺位的“第一个空框”塞进去
+    for(int i = 0; i < m_channels.size(); ++i) {
+        auto channel = m_channels[i];
+        if(channel->isBarcodeEmpty()) {
+
+            // 【核心修复1】：不再调用 checkScanInput，直接强行写入条码，绕过底层的异步焦点判定！
+            channel->forceInjectBarcode(code);
+
+            // 填完后，寻找下一个空位
+            for(int j = 1; j < m_channels.size(); ++j) {
+                int nextIdx = (i + j) % m_channels.size();
+                if(m_channels[nextIdx]->isBarcodeEmpty()) {
+
+                    // 【核心修复2】：加上 10 毫秒延时，确保系统有足够时间平滑转移焦点
+                    QTimer::singleShot(10, this, [=]() {
+                        m_channels[nextIdx]->setFocusToBarcode();
+                    });
+                    break;
+                }
+            }
+            return;
+        }
+    }
+
+    // 4. 第四轮：全局孤儿警告
     // 既没有匹配的，用户也没指定通道(没聚焦)
     QMessageBox::warning(this, "扫码错误",
                          QString("扫描内容: [%1]\n未找到匹配的设备！\n\n请检查：\n1. 串口数据是否已读取？\n2. 是否扫描了错误的标签？").arg(code));
+}
+
+// ====================================================================
+// [新增逻辑] 捕获通道内扫码完成动作，寻找下一个空位并跳转焦点
+// ====================================================================
+void MainWindow::onChannelScanFinished(int currentId) {
+    // 传入的 currentId 是从 1 开始的，转为数组索引 (-1)
+    int currentIndex = currentId - 1;
+    int total = m_channels.size();
+
+    // 往后遍历，寻找下一个没填条码的空框
+    for(int j = 1; j < total; ++j) {
+        int nextIdx = (currentIndex + j) % total;
+
+        if(m_channels[nextIdx]->isBarcodeEmpty()) {
+            // [关键技巧] 使用 QTimer::singleShot 异步延时 10 毫秒设置焦点。
+            // 原因是 QLineEdit 处理回车键的底层事件还没结束，如果立刻抢走焦点会导致光标乱闪或失效。
+            QTimer::singleShot(10, this, [=]() {
+                m_channels[nextIdx]->setFocusToBarcode();
+            });
+            break; // 找到一个空位跳过去就停止
+        }
+    }
+}
+
+// ====================================================================
+// [修改逻辑] 当任意一个通道触发重新检测时，全局清空所有扫码框
+// ====================================================================
+void MainWindow::onChannelCleared() {
+    // 1. 工装同时压下，视为整批测试开始。直接遍历清空所有通道的扫码框！
+    for(auto channel : qAsConst(m_channels)) {
+        channel->clearBarcodeOnly();
+    }
+
+    // 2. 延时 20 毫秒（等待所有并发的串口数据处理完），强制把光标拉回【通道 1】
+    QTimer::singleShot(20, this, [=]() {
+        if(!m_channels.isEmpty()) {
+            m_channels[0]->setFocusToBarcode(); // 永远从通道 1 开始新一轮扫码
+        }
+    });
 }

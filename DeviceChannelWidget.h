@@ -44,6 +44,35 @@ public:
     bool hasFocusInBar() const {
         return m_editBarcode->hasFocus();
     }
+    // ================= [新增] =================
+    // 获取当前扫码框是否为空
+    bool isBarcodeEmpty() const {
+        return m_editBarcode->text().trimmed().isEmpty();
+    }
+    // 让扫码框强制获取焦点，并全选内容（方便下次覆盖）
+    void setFocusToBarcode() {
+        m_editBarcode->setFocus();
+        m_editBarcode->selectAll();
+    }
+    // ==========================================
+
+    // [新增] 强行填入条码并触发比对（无视焦点检查）
+    void forceInjectBarcode(const QString &code) {
+        m_editBarcode->setText(code);
+        updateSerialDisplay(); // 触发界面的红绿变色判定
+    }
+
+    // [新增] 仅清空当前通道的扫码框内容
+    void clearBarcodeOnly() {
+        if (m_editBarcode) {
+            m_editBarcode->clear();
+        }
+    }
+
+signals:
+    // [新增信号] 扫码枪发送回车时触发，携带当前通道的 ID
+    void barcodeReturnPressed(int currentId);
+    void barcodeCleared();                    // [新增] 告诉主窗口：我被清空了！
 
 private slots:
     void onStartClicked();
