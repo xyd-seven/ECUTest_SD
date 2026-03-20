@@ -11,7 +11,7 @@
 #include <QFileInfo>
 #include <QDir>
 
-enum TestType { Type_Match, Type_Range, Type_Exist, Type_NotMatch, Type_Display };
+enum TestType { Type_Match, Type_Range, Type_Exist, Type_NotMatch, Type_Display, Type_Toggle };
 
 struct IdentityRule {
     QString key;
@@ -116,7 +116,12 @@ private:
                     rule.targetVal = QString::number(obj.value("target").toDouble());
             } else if (typeStr == "display" || typeStr == "show" || typeStr == "read") {
                 rule.type = Type_Display;
-            } else {
+            }
+            // ================= [新增] 翻转测试类型 =================
+            else if (typeStr == "toggle") {
+                rule.type = Type_Toggle;
+            }
+            else {
                 rule.type = Type_Match;
                 rule.targetVal = obj.value("target").toString();
                 if(rule.targetVal.isEmpty() && obj.contains("target"))

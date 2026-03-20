@@ -3,6 +3,7 @@
 #include <QtGlobal>
 #include <QTimer>
 #include <QMetaObject> // [新增] 支持底层的信号事件派发
+#include <QApplication>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -34,6 +35,12 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(m_spinBoxCount, QOverload<int>::of(&QSpinBox::valueChanged),
             this, &MainWindow::onChannelCountChanged);
+
+    // --- 新增：注册全局拦截器与定时器 ---
+    qApp->installEventFilter(this);
+    m_scanProcessTimer = new QTimer(this);
+    m_scanProcessTimer->setSingleShot(true);
+    connect(m_scanProcessTimer, &QTimer::timeout, this, &MainWindow::processScanBuffer);
 
     onChannelCountChanged(2);
 }
@@ -88,62 +95,38 @@ void MainWindow::onChannelCountChanged(int count)
     }, Qt::QueuedConnection);
 }
 
-void MainWindow::keyPressEvent(QKeyEvent *event) {
-    if(event->key() != Qt::Key_Return && event->key() != Qt::Key_Enter) {
-        // [优化] 增加防抖超时处理，防止误触键盘导致字符一直卡在缓冲区
-        if (m_scanTimer.isValid() && m_scanTimer.elapsed() > 100) {
-            m_scanBuffer.clear(); // 超过 100ms 没输入新的字符，判定为手误按键/乱码，丢弃
+// ====================================================================
+// [终极拦截器] 拦截软件内的所有键盘输入，将多行条码揉成单行
+// ====================================================================
+bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    // 安全机制：如果弹出了错误提示框，不要拦截键盘，让用户能按回车关闭提示框
+    if (qApp->activeWindow() != this) {
+        return QMainWindow::eventFilter(watched, event);
+    }
+
+    if (event->type() == QEvent::KeyPress) {
+        QKeyEvent *ke = static_cast<QKeyEvent *>(event);
+
+        // 忽略 Shift/Ctrl 等修饰键
+        if (ke->key() == Qt::Key_Shift || ke->key() == Qt::Key_Control || ke->key() == Qt::Key_Alt) {
+            return false;
         }
-        m_scanTimer.start(); // 重新开始计时
-        m_scanBuffer.append(event->text());
-        return;
-    }
-
-    QString code = m_scanBuffer.trimmed();
-    m_scanBuffer.clear();
-    if(code.isEmpty()) return;
-
-    for(auto channel : qAsConst(m_channels)) {
-        if(channel->checkScanInput(code) == ScanResult::Match) return;
-    }
-
-    for(int i = 0; i < m_channels.size(); ++i) {
-        auto channel = m_channels[i];
-        if(channel->hasFocusInBar()) {
-            channel->checkScanInput(code);
-
-            for(int j = 1; j < m_channels.size(); ++j) {
-                int nextIdx = (i + j) % m_channels.size();
-                if(m_channels[nextIdx]->isBarcodeEmpty()) {
-                    m_channels[nextIdx]->setFocusToBarcode();
-                    break;
-                }
-            }
-            return;
+        // 在头部定义一个统一的时间常量（比如拉长到 250 毫秒）
+        const int SCAN_TIMEOUT = 300;
+        // 核心：如果扫码枪发出了“回车”或“换行”，强行把它替换成“空格”！
+        if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) {
+            m_scanBuffer.append(" ");
+            m_scanProcessTimer->start(SCAN_TIMEOUT); // 使用常量
+            return true; // 吞掉这个回车，不让底层的输入框知道！
+        }
+        // 收集普通字符
+        else if (!ke->text().isEmpty()) {
+            m_scanBuffer.append(ke->text());
+            m_scanProcessTimer->start(SCAN_TIMEOUT); // 使用常量
+            return true; // 吞掉字符
         }
     }
-
-    for(int i = 0; i < m_channels.size(); ++i) {
-        auto channel = m_channels[i];
-        if(channel->isBarcodeEmpty()) {
-            channel->forceInjectBarcode(code);
-
-            for(int j = 1; j < m_channels.size(); ++j) {
-                int nextIdx = (i + j) % m_channels.size();
-                if(m_channels[nextIdx]->isBarcodeEmpty()) {
-                    // [优化] 取消死时间，用事件派发解决焦点切换异步问题
-                    QMetaObject::invokeMethod(this, [=]() {
-                        m_channels[nextIdx]->setFocusToBarcode();
-                    }, Qt::QueuedConnection);
-                    break;
-                }
-            }
-            return;
-        }
-    }
-
-    QMessageBox::warning(this, "扫码错误",
-                         QString("扫描内容: [%1]\n未找到匹配的设备！\n\n请检查：\n1. 串口数据是否已读取？\n2. 是否扫描了错误的标签？").arg(code));
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::onChannelScanFinished(int currentId) {
@@ -163,17 +146,73 @@ void MainWindow::onChannelScanFinished(int currentId) {
 }
 
 void MainWindow::onChannelCleared(bool isGlobal) {
-    // [优化] 分辨是全局重压工装，还是某个通道私下重置
-    if (isGlobal) {
+    if (isGlobal) { // [新增判定] 只有在工装整体重置时，才清空全部并抢回焦点
         for(auto channel : qAsConst(m_channels)) {
             channel->clearBarcodeOnly();
         }
+
+        // 焦点回归第一通道
+        QMetaObject::invokeMethod(this, [=]() {
+            if(!m_channels.isEmpty()) {
+                m_channels[0]->setFocusToBarcode();
+            }
+        }, Qt::QueuedConnection);
+    }
+}
+// ====================================================================
+// [条码分发] 定时器 150ms 超时，说明一长串多行条码彻底扫完了
+// ====================================================================
+void MainWindow::processScanBuffer() {
+    QString code = m_scanBuffer.simplified();
+    m_scanBuffer.clear();
+    if(code.isEmpty()) return;
+
+    // =================================================================
+    // 【核心修正】：彻底删除“全局完美匹配”！
+    // 强制按照物理光标顺序录入。就算壳子装反了，也要强行塞进当前通道，
+    // 让底层界面爆红报警，暴露装配错误！
+    // =================================================================
+
+    // 1. 寻找当前持有光标的通道 (严格按物理顺序强行写入)
+    for(int i = 0; i < m_channels.size(); ++i) {
+        auto channel = m_channels[i];
+        if(channel->hasFocusInBar()) {
+            channel->forceInjectBarcode(code); // 强行塞入
+
+            // 写入完毕，光标自动跳到下一个空位
+            for(int j = 1; j < m_channels.size(); ++j) {
+                int nextIdx = (i + j) % m_channels.size();
+                if(m_channels[nextIdx]->isBarcodeEmpty()) {
+                    QMetaObject::invokeMethod(this, [=]() {
+                        m_channels[nextIdx]->setFocusToBarcode();
+                    }, Qt::QueuedConnection);
+                    break;
+                }
+            }
+            return;
+        }
     }
 
-    // 焦点回归
-    QMetaObject::invokeMethod(this, [=]() {
-        if(!m_channels.isEmpty()) {
-            m_channels[0]->setFocusToBarcode();
+    // 2. 智能找空位 (如果因为意外没有光标，按顺序填第一个空坑)
+    for(int i = 0; i < m_channels.size(); ++i) {
+        auto channel = m_channels[i];
+        if(channel->isBarcodeEmpty()) {
+            channel->forceInjectBarcode(code);
+
+            for(int j = 1; j < m_channels.size(); ++j) {
+                int nextIdx = (i + j) % m_channels.size();
+                if(m_channels[nextIdx]->isBarcodeEmpty()) {
+                    QMetaObject::invokeMethod(this, [=]() {
+                        m_channels[nextIdx]->setFocusToBarcode();
+                    }, Qt::QueuedConnection);
+                    break;
+                }
+            }
+            return;
         }
-    }, Qt::QueuedConnection);
+    }
+
+    // 3. 全局报错 (所有通道的码都扫满了，工人还多扫了一下)
+    QMessageBox::warning(this, "扫码越界",
+                         QString("扫描内容: [%1]\n当前所有通道均已录入条码！\n请先清空或完成测试后再扫码。").arg(code));
 }

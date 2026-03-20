@@ -21,12 +21,14 @@ public:
     ~MainWindow();
 
 protected:
-    void keyPressEvent(QKeyEvent *event) override;
+    // [新增] 全局事件过滤器，用于拦截整个软件的键盘输入
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
     void onChannelCountChanged(int count);
     void onChannelScanFinished(int currentId);
     void onChannelCleared(bool isGlobal); // [修改] 增加判定参数
+    void processScanBuffer();
 
 private:
     QWidget *m_centralWidget;
@@ -37,7 +39,7 @@ private:
     QSpinBox *m_spinBoxCount;
 
     QString m_scanBuffer;
-    QElapsedTimer m_scanTimer; // [新增] 用于防抖处理断帧的乱码
+    QTimer *m_scanProcessTimer; // [修改] 改为 QTimer 延时处理
 };
 
 #endif // MAINWINDOW_H

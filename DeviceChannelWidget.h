@@ -68,7 +68,7 @@ private slots:
 
 private:
     void setupUi();
-    void resetUI();
+    void resetUI(bool isGlobal = false); // [修改这行] 增加 isGlobal 参数
     void processBuffer();
     void parseLine(const QString &line);
     void parseTelemetry(const QString &dataPart);
@@ -97,7 +97,7 @@ private:
     QMap<QString, QString> m_currentIds;
     QMap<QString, int> m_mapResRow;
 
-    qint64 m_lastResetTime = 0;
+    qint64 m_lastAuthTime = 0;     // [新增] 用于记录最后一次收到 IMEI 的时间
     QFile *m_logFile = nullptr;
     QDate m_logDate; // [优化] 用于处理跨天日志分割
 

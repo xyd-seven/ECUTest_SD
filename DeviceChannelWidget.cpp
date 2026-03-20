@@ -99,6 +99,8 @@ void DeviceChannelWidget::setupUi() {
     m_editBarcode = new QLineEdit();
     m_editBarcode->setPlaceholderText("请扫描设备二维码...");
     m_editBarcode->setFont(QFont("Arial", 10));
+    // [加入这行代码，彻底封杀输入法]
+    m_editBarcode->setAttribute(Qt::WA_InputMethodEnabled, false);
 
     QLabel *lblRead = new QLabel("串口读取:");
     lblRead->setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
@@ -155,9 +157,6 @@ void DeviceChannelWidget::setupUi() {
     connect(btnStop, &QPushButton::clicked, this, &DeviceChannelWidget::onStopClicked);
     connect(m_serial, &QSerialPort::readyRead, this, &DeviceChannelWidget::onSerialReadyRead);
     connect(m_editBarcode, &QLineEdit::textChanged, this, &DeviceChannelWidget::onBarcodeChanged);
-    connect(m_editBarcode, &QLineEdit::returnPressed, this, [=](){
-        emit barcodeReturnPressed(m_id);
-    });
     // ================= [新增] =================
     // 监听串口底层错误（如 USB 被拔出）
     connect(m_serial, &QSerialPort::errorOccurred, this, &DeviceChannelWidget::onSerialError);
@@ -189,11 +188,11 @@ void DeviceChannelWidget::setupUi() {
     connect(btnClear, &QPushButton::clicked, this, [=](){
         m_buffer.clear();
         m_logView->clear();
-        resetUI();
+        resetUI(true); // [修改] 只有人工点击清空，才触发全局焦点重置
     });
 }
 
-void DeviceChannelWidget::resetUI() {
+void DeviceChannelWidget::resetUI(bool isGlobal) {
     m_currentIds.clear();
     m_editSerialRead->clear();
     m_editSerialRead->setStyleSheet("background-color: #F0F0F0; color: #555;");
@@ -219,6 +218,8 @@ void DeviceChannelWidget::resetUI() {
         QTableWidgetItem *resItem = new QTableWidgetItem("WAIT");
         resItem->setTextAlignment(Qt::AlignCenter);
         resItem->setFont(QFont("Arial", 9));
+        // [新增] 初始化状态寄存器为 0
+        resItem->setData(Qt::UserRole, 0);
         m_tableRes->setItem(r, c_base + 1, resItem);
 
         m_mapResRow[teleRules[i].key] = i;
@@ -230,7 +231,7 @@ void DeviceChannelWidget::resetUI() {
 
     if(m_editBarcode) {
         m_editBarcode->clear();
-        emit barcodeCleared(true); // 任何触发重置的情况，发送全局清空请求
+        emit barcodeCleared(isGlobal); // [修改] 不再永远传 true
     }
 }
 
@@ -313,14 +314,21 @@ void DeviceChannelWidget::parseLine(const QString &line) {
                 if (isAuthority && !deviceVal.isEmpty()) {
                     QString currentVal = m_currentIds.value(rule.key);
                     qint64 now = QDateTime::currentMSecsSinceEpoch();
-                    bool isNew = (currentVal != deviceVal);
-                    bool isRetest = (now - m_lastResetTime > 8000);
 
-                    if (isNew || isRetest) {
-                        resetUI();
-                        m_lastResetTime = now;
+                    bool isNew = (currentVal != deviceVal);
+                    // ========================================================
+                    // [核心优化] 识别码心跳断层检测
+                    // 如果收到相同的 IMEI，且距离上次收到 IMEI 的时间超过了 5000 毫秒（5秒）
+                    // 100% 说明这块板子被工人重启或重新插拔了，触发自动重测！
+                    // ========================================================
+                    bool isReboot = (!currentVal.isEmpty() && currentVal == deviceVal && (now - m_lastAuthTime > 7000));
+
+                    if (isNew || isReboot) {
+                        resetUI(false); // 局部重置界面，绝不抢夺主窗口焦点
                         m_currentIds.insert(rule.key, deviceVal);
                     }
+                    // 只要收到 IMEI，就刷新最后存活时间
+                    m_lastAuthTime = now;
                 }
 
                 m_currentIds.insert(rule.key, deviceVal);
@@ -345,12 +353,21 @@ void DeviceChannelWidget::updateSerialDisplay() {
     QString fullInfo = displayParts.join(" ");
     m_editSerialRead->setText(fullInfo);
 
-    QString scanText = m_editBarcode->text().trimmed();
-    QString serialText = fullInfo.trimmed();
+    // ========================================================
+    // [格式宽容优化]：不直接比对长字符串，而是拆分为数组进行无序比对
+    // ========================================================
+    // 使用 simplified() 自动压缩多个空格为单个空格，再按空格拆分为数组
+    QStringList scanList = m_editBarcode->text().simplified().split(' ', Qt::SkipEmptyParts);
+    QStringList serialList = fullInfo.simplified().split(' ', Qt::SkipEmptyParts);
 
-    if (scanText.isEmpty() || serialText.isEmpty()) {
+    // 对两个数组进行字母排序，屏蔽掉二维码中各项排列顺序不同的问题
+    scanList.sort();
+    serialList.sort();
+
+    if (scanList.isEmpty() || serialList.isEmpty()) {
         m_editSerialRead->setStyleSheet("background-color: #F0F0F0; color: #555;");
-    } else if (scanText == serialText) {
+    } else if (scanList == serialList) {
+        // 数组比对：只要内容一样（不论原来的顺序和多余空格），就算完美匹配！
         m_editSerialRead->setStyleSheet("background-color: #DFF0D8; color: #3C763D; font-weight: bold; border: 2px solid green;");
     } else {
         m_editSerialRead->setStyleSheet("background-color: #F2DEDE; color: #A94442; font-weight: bold; border: 2px solid red;");
@@ -440,7 +457,21 @@ void DeviceChannelWidget::updateResultItem(const QString &key, const QString &va
 
     bool pass = false;
     double numVal = val.toDouble();
-    if(rule.type == Type_Match) pass = (val == rule.targetVal);
+    // ========================================================
+    // [新增逻辑] 状态翻转检测 (0和1都必须出现过)
+    // ========================================================
+    if (rule.type == Type_Toggle) {
+        int state = item->data(Qt::UserRole).toInt(); // 取出历史状态
+
+        if (numVal == 0) state |= 1;      // 如果收到0，将第0位置为1 (二进制 01)
+        else if (numVal == 1) state |= 2; // 如果收到1，将第1位置为1 (二进制 10)
+
+        item->setData(Qt::UserRole, state); // 把新状态存回去
+
+        pass = (state == 3); // 只有当 0和1 都收到过 (二进制 11，即十进制的3)，才算通过！
+    }
+    // ========================================================
+    else if(rule.type == Type_Match) pass = (val == rule.targetVal);
     else if (rule.type == Type_NotMatch) pass = (val != rule.targetVal);
     else if (rule.type == Type_Range) pass = (numVal >= rule.minVal && numVal <= rule.maxVal);
     else pass = (val != "0" && !val.isEmpty());
@@ -451,8 +482,23 @@ void DeviceChannelWidget::updateResultItem(const QString &key, const QString &va
         item->setForeground(QBrush(QColor(0, 150, 0)));
         item->setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
     } else {
-        item->setText(QString("NG (%1)").arg(val));
-        item->setBackground(QBrush(QColor(255, 0, 0)));
+        // [新增] 针对 Toggle 测试，给出明确的“缺啥”提示
+        if (rule.type == Type_Toggle) {
+            int state = item->data(Qt::UserRole).toInt();
+            if (state == 1) {
+                item->setText("NG (有0缺1)");
+                item->setBackground(QBrush(QColor(255, 140, 0))); // 橙色警告
+            } else if (state == 2) {
+                item->setText("NG (有1缺0)");
+                item->setBackground(QBrush(QColor(255, 140, 0))); // 橙色警告
+            } else {
+                item->setText(QString("NG (%1)").arg(val));
+                item->setBackground(QBrush(QColor(255, 0, 0)));
+            }
+        } else {
+            item->setText(QString("NG (%1)").arg(val));
+            item->setBackground(QBrush(QColor(255, 0, 0)));
+        }
         item->setForeground(QBrush(Qt::white));
         item->setFont(QFont("Arial", 8));
     }
@@ -509,27 +555,21 @@ void DeviceChannelWidget::parseTelemetry(const QString &dataPart) {
 }
 
 ScanResult DeviceChannelWidget::checkScanInput(const QString &code) {
-    QString mySerialData = m_editSerialRead->text().trimmed();
+    QString mySerialData = m_editSerialRead->text();
 
     if(mySerialData.isEmpty()) {
-        if(m_editBarcode->hasFocus()) {
-            m_editBarcode->setText(code);
-            return ScanResult::Mismatch;
-        }
+        if(m_editBarcode->hasFocus()) return ScanResult::Mismatch;
         return ScanResult::Ignore;
     }
 
-    if(code == mySerialData) {
-        m_editBarcode->setText(code);
-        updateSerialDisplay();
-        return ScanResult::Match;
-    }
+    QStringList scanList = code.simplified().split(' ', Qt::SkipEmptyParts);
+    QStringList serialList = mySerialData.simplified().split(' ', Qt::SkipEmptyParts);
+    scanList.sort();
+    serialList.sort();
 
-    if(m_editBarcode->hasFocus()) {
-        m_editBarcode->setText(code);
-        updateSerialDisplay();
-        return ScanResult::Mismatch;
-    }
+    if(scanList == serialList) return ScanResult::Match;
+    if(m_editBarcode->hasFocus()) return ScanResult::Mismatch;
+
     return ScanResult::Ignore;
 }
 
