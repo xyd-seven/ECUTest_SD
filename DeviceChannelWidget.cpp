@@ -2,6 +2,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QSplitter>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QDebug>
@@ -132,14 +133,23 @@ void DeviceChannelWidget::setupUi() {
     m_logView = new QPlainTextEdit();
     m_logView->setReadOnly(true);
     m_logView->setMinimumHeight(60);
-    m_logView->setMaximumHeight(150);
+    // [优化] 取消最大高度限制，以允许用户拖动调整
     m_logView->setFont(QFont("Consolas", 9));
     m_logView->setMaximumBlockCount(3000);
 
     groupLayout->addLayout(topLayout);
     groupLayout->addLayout(compareLayout);
-    groupLayout->addWidget(m_tableRes);
-    groupLayout->addWidget(m_logView);
+    
+    // [新增] 使用垂直分割器 QSplitter 让表格和日志窗口能上下手动伸缩
+    QSplitter *splitter = new QSplitter(Qt::Vertical);
+    splitter->setChildrenCollapsible(false); // 防止把某一块完全拉到消失
+    splitter->addWidget(m_tableRes);
+    splitter->addWidget(m_logView);
+    // 设置默认比例：表格占多数，日志占小数
+    splitter->setStretchFactor(0, 4);
+    splitter->setStretchFactor(1, 1);
+    
+    groupLayout->addWidget(splitter);
     mainLayout->addWidget(m_group);
 
     // Kiosk 防呆
