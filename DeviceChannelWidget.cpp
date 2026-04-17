@@ -41,7 +41,8 @@ void DeviceChannelWidget::setupUi() {
         m_cbModel->setCurrentIndex(0);
         m_config.loadConfig(m_cbModel->currentText()); // 使用本地配置
     }
-    m_cbModel->setMaximumWidth(100);
+    m_cbModel->setMinimumWidth(150);
+    m_cbModel->setMaximumWidth(300);
 
     m_cbPort = new QComboBox();
     const auto ports = QSerialPortInfo::availablePorts();
@@ -257,7 +258,7 @@ void DeviceChannelWidget::onSerialReadyRead() {
 
         if (m_logFile->isOpen()) {
             m_logFile->write(data);
-            m_logFile->flush();
+            // 优化：已移除过于频繁的 flush()，交由操作系统缓冲控制落盘
         }
     }
 
@@ -332,12 +333,17 @@ void DeviceChannelWidget::parseLine(const QString &line) {
                 }
 
                 m_currentIds.insert(rule.key, deviceVal);
-                updateSerialDisplay();
+                needCompare = true;
                 break;
             }
         }
     }
-    if(needCompare) performComparison();
+    
+    // [优化] 外提 UI 更新，避免在 for 循环的每一步中反复触发昂贵界面的重新渲染和字符串分隔排序
+    if(needCompare) {
+        updateSerialDisplay();
+        performComparison();
+    }
 }
 
 void DeviceChannelWidget::updateSerialDisplay() {
@@ -602,25 +608,14 @@ void DeviceChannelWidget::tryReconnect() {
         return;
     }
 
-    // 1. 先检查物理层面上，这个 COM 口是不是已经插回来了
-    bool portExists = false;
-    const auto ports = QSerialPortInfo::availablePorts();
-    for (const auto &info : ports) {
-        if (info.portName() == m_cbPort->currentText()) {
-            portExists = true;
-            break;
-        }
-    }
+    // [优化] 不再使用昂贵的全系统 QSerialPortInfo::availablePorts() 去遍历注册表，避免在主线程假死
+    // 直接复用原来的串口名对系统发送连接请求，快速捕获失败/成功状态
+    m_serial->setPortName(m_cbPort->currentText());
+    if (m_serial->open(QIODevice::ReadWrite)) {
+        m_reconnectTimer->stop(); // 重连成功，关闭定时器
+        m_logView->appendPlainText(">>> 自动重连成功! 继续测试...");
+        setChannelStatus(true);   // 界面边框恢复绿色
 
-    // 2. 如果设备插回来了，尝试打开它
-    if (portExists) {
-        m_serial->setPortName(m_cbPort->currentText());
-        if (m_serial->open(QIODevice::ReadWrite)) {
-            m_reconnectTimer->stop(); // 重连成功，关闭定时器
-            m_logView->appendPlainText(">>> 自动重连成功! 继续测试...");
-            setChannelStatus(true);   // 界面边框恢复绿色
-
-            // 注意：这里不需要调用 resetUI()，这样掉线前没测完的数据可以接着测
-        }
+        // 注意：这里不需要调用 resetUI()，这样掉线前没测完的数据可以接着测
     }
 }

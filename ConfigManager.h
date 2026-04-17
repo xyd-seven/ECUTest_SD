@@ -72,8 +72,8 @@ public:
         parseTelemetryRules(root.value("telemetry_rules").toArray());
     }
 
-    QVector<IdentityRule> getIdentityRules() const { return m_identities; }
-    QVector<TestRule> getTelemetryRules() const { return m_telemetries; }
+    const QVector<IdentityRule>& getIdentityRules() const { return m_identities; }
+    const QVector<TestRule>& getTelemetryRules() const { return m_telemetries; }
 
 private:
     QVector<IdentityRule> m_identities;
