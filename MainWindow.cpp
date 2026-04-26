@@ -33,8 +33,41 @@ MainWindow::MainWindow(QWidget *parent)
     m_spinBoxCount->setFocusPolicy(Qt::NoFocus);
     toolbar->addWidget(m_spinBoxCount);
 
+    toolbar->addSeparator();
+    QPushButton *btnConfigEditor = new QPushButton("⚙️ 检测项配置", this);
+    btnConfigEditor->setFont(QFont("Microsoft YaHei", 10, QFont::Bold));
+    btnConfigEditor->setFocusPolicy(Qt::NoFocus);
+    toolbar->addWidget(btnConfigEditor);
+
+    connect(btnConfigEditor, &QPushButton::clicked, this, [this](){
+        ConfigEditorDialog dlg(this);
+        connect(&dlg, &ConfigEditorDialog::configSaved, this, &MainWindow::reloadConfigsAllChannels);
+        dlg.exec(); // 模态阻塞弹出
+    });
+
+    toolbar->addSeparator();
+    QPushButton *btnClearAllStats = new QPushButton("🧹 清空所有产能数据", this);
+    btnClearAllStats->setFont(QFont("Microsoft YaHei", 10, QFont::Bold));
+    btnClearAllStats->setStyleSheet("color: #E65100;");
+    btnClearAllStats->setFocusPolicy(Qt::NoFocus);
+    toolbar->addWidget(btnClearAllStats);
+
+    connect(btnClearAllStats, &QPushButton::clicked, this, [this]() {
+        if (QMessageBox::question(this, "严重警告", "这将清空所有通道的产能统计（PASS/NG）计数！\n确定要继续吗？") == QMessageBox::Yes) {
+            for (auto channel : m_channels) {
+                if (channel) channel->resetStats();
+            }
+        }
+    });
+
     connect(m_spinBoxCount, QOverload<int>::of(&QSpinBox::valueChanged),
             this, &MainWindow::onChannelCountChanged);
+
+    toolbar->addSeparator();
+    m_lblGlobalStats = new QLabel("【全局总计】✅ 成功: 0    ❌ 失败: 0", this);
+    m_lblGlobalStats->setFont(QFont("Microsoft YaHei", 11, QFont::Bold));
+    m_lblGlobalStats->setStyleSheet("color: #004D40; padding: 0 20px;");
+    toolbar->addWidget(m_lblGlobalStats);
 
     // --- 新增：注册全局拦截器与定时器 ---
     qApp->installEventFilter(this);
@@ -77,6 +110,7 @@ void MainWindow::onChannelCountChanged(int count)
 
         connect(w, &DeviceChannelWidget::barcodeReturnPressed, this, &MainWindow::onChannelScanFinished);
         connect(w, &DeviceChannelWidget::barcodeCleared, this, &MainWindow::onChannelCleared);
+        connect(w, &DeviceChannelWidget::statsUpdated, this, &MainWindow::updateGlobalStats);
 
         m_channels.append(w);
 
@@ -86,6 +120,7 @@ void MainWindow::onChannelCountChanged(int count)
     }
 
     setUpdatesEnabled(true);
+    updateGlobalStats(); // [新增] 创建新通道后强制刷新一下总计
 
     // [优化] 使用底层的事件队列投递（比固定写死毫秒数延时更稳）
     QMetaObject::invokeMethod(this, [=]() {
@@ -215,4 +250,23 @@ void MainWindow::processScanBuffer() {
     // 3. 全局报错 (所有通道的码都扫满了，工人还多扫了一下)
     QMessageBox::warning(this, "扫码越界",
                          QString("扫描内容: [%1]\n当前所有通道均已录入条码！\n请先清空或完成测试后再扫码。").arg(code));
+}
+
+void MainWindow::reloadConfigsAllChannels()
+{
+    for (auto channel : m_channels) {
+        if (channel) channel->reloadConfigList();
+    }
+}
+
+void MainWindow::updateGlobalStats() {
+    int totalPass = 0;
+    int totalNg = 0;
+    for (auto channel : m_channels) {
+        if (channel) {
+            totalPass += channel->getPassCount();
+            totalNg += channel->getNgCount();
+        }
+    }
+    m_lblGlobalStats->setText(QString("【全局总计】✅ 成功: %1    ❌ 失败: %2").arg(totalPass).arg(totalNg));
 }

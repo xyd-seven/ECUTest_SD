@@ -8,12 +8,21 @@
 #include <QDebug>
 #include <QDateTime>
 #include <QSettings>
+#include <QTimer>
+#include <QFile>
+#include <QTextStream>
+#include <QMessageBox>
 
 DeviceChannelWidget::DeviceChannelWidget(int id, QWidget *parent)
     : QWidget(parent), m_id(id)
 {
     m_serial = new QSerialPort(this);
+    m_timeoutTimer = new QTimer(this);
+    m_timeoutTimer->setSingleShot(true);
+    connect(m_timeoutTimer, &QTimer::timeout, this, &DeviceChannelWidget::onTimeout);
+    
     setupUi();
+    loadStatsLog();
 }
 
 void DeviceChannelWidget::setupUi() {
@@ -92,6 +101,19 @@ void DeviceChannelWidget::setupUi() {
     topLayout->addWidget(btnClear);
     topLayout->addStretch();
 
+    // ==========================================
+    // [新增] 统计与重置面板
+    // ==========================================
+    QHBoxLayout *statsLayout = new QHBoxLayout();
+    m_lbStats = new QLabel("✅ 成功: 0    ❌ 失败: 0");
+    m_lbStats->setStyleSheet("font-weight: bold; color: #333; font-size: 13px;");
+    m_btnResetStats = new QPushButton("🔄 重置");
+    m_btnResetStats->setMaximumWidth(60);
+    connect(m_btnResetStats, &QPushButton::clicked, this, &DeviceChannelWidget::resetStats);
+    statsLayout->addWidget(m_lbStats);
+    statsLayout->addStretch();
+    statsLayout->addWidget(m_btnResetStats);
+
     QGridLayout *compareLayout = new QGridLayout();
     compareLayout->setContentsMargins(0, 0, 0, 0);
     compareLayout->setSpacing(4);
@@ -138,6 +160,7 @@ void DeviceChannelWidget::setupUi() {
     m_logView->setMaximumBlockCount(3000);
 
     groupLayout->addLayout(topLayout);
+    groupLayout->addLayout(statsLayout); // [新增]
     groupLayout->addLayout(compareLayout);
     
     // [新增] 使用垂直分割器 QSplitter 让表格和日志窗口能上下手动伸缩
@@ -238,6 +261,11 @@ void DeviceChannelWidget::resetUI(bool isGlobal) {
 
     m_logView->appendPlainText("\n----------------- [New Test Start] -----------------");
     m_hasError = false;
+    m_isDeviceFinished = false; // [新增] 新设备开始，解锁生命周期
+    m_timeoutTimer->stop(); // 停止倒计时
+    
+    // 恢复状态外观
+    m_group->setTitle(QString("通道 %1").arg(m_id));
     setChannelStatus(true);
 
     if(m_editBarcode) {
@@ -304,6 +332,8 @@ void DeviceChannelWidget::parseLine(const QString &line) {
     if(!m_isTesting) return;
 
     if(line.contains("$info,")) {
+        if (m_isDeviceFinished) return; // [新增] 如果设备已结案，拒收后续延迟发来的冗余参数
+
         int start = line.indexOf("$info,");
         parseTelemetry(line.mid(start + 6));
         return;
@@ -344,6 +374,13 @@ void DeviceChannelWidget::parseLine(const QString &line) {
 
                 m_currentIds.insert(rule.key, deviceVal);
                 needCompare = true;
+
+                // [新增] 引爆测试倒计时炸弹！完全抛弃扫码枪束缚，以串口为准！
+                if (!m_timeoutTimer->isActive() && m_config.getTimeout() > 0) {
+                    m_timeoutTimer->start(m_config.getTimeout() * 1000);
+                    m_logView->appendPlainText(QString(">>> [倒计时启动] 已侦测到终端心跳，开始测试周期，限时 %1 秒！").arg(m_config.getTimeout()));
+                }
+
                 break;
             }
         }
@@ -429,6 +466,7 @@ void DeviceChannelWidget::onStartClicked() {
 
 void DeviceChannelWidget::onStopClicked() {
     m_reconnectTimer->stop(); // [新增] 用户主动点击停止，彻底放弃重连尝试
+    m_timeoutTimer->stop();
     if(m_serial->isOpen()) {
         m_serial->close();
         m_isTesting = false;
@@ -521,16 +559,44 @@ void DeviceChannelWidget::updateResultItem(const QString &key, const QString &va
 }
 
 void DeviceChannelWidget::performComparison() {
+    if (!m_isTesting) return;
+
+    // 1. 检查物理项是否全部通过
     bool allPass = true;
     for(int i=0; i<m_tableRes->rowCount(); i++) {
         for(int j=1; j<8; j+=2) {
             QTableWidgetItem *item = m_tableRes->item(i, j);
             if(item && (item->text().startsWith("NG") || item->text() == "WAIT")) {
-                if(item->text().startsWith("NG")) allPass = false;
+                allPass = false;
+                break; // 只要有任何一项没测完或不合格，就不算成功
             }
         }
+        if(!allPass) break;
     }
-    setChannelStatus(allPass);
+    
+    // 2. 检查扫码身份匹配（前提是配置了身份规则）
+    bool identityMatch = false;
+    if (m_config.getIdentityRules().isEmpty()) {
+        identityMatch = true; // 没配置身份规则，直接放行
+    } else {
+        QStringList scanList = m_editBarcode->text().simplified().split(' ', Qt::SkipEmptyParts);
+        QStringList serialList = m_editSerialRead->text().simplified().split(' ', Qt::SkipEmptyParts);
+        scanList.sort();
+        serialList.sort();
+        
+        // 只有当扫码枪扫入的内容和串口打印的内容严格一致时，才算匹配通过
+        if (!scanList.isEmpty() && scanList == serialList) {
+            identityMatch = true;
+        }
+    }
+    
+    // [修复] 只有当物理检测全绿，且扫码比对也成功时，才允许提前结案 PASS！
+    if (allPass && identityMatch) {
+        finishTest(true, false);
+    } else {
+        // 如果物理项没过，或者扫码还没扫/不匹配，继续等待直到倒计时结束
+        setChannelStatus(false);
+    }
 }
 
 void DeviceChannelWidget::setChannelStatus(bool active) {
@@ -627,5 +693,155 @@ void DeviceChannelWidget::tryReconnect() {
         setChannelStatus(true);   // 界面边框恢复绿色
 
         // 注意：这里不需要调用 resetUI()，这样掉线前没测完的数据可以接着测
+    }
+}
+
+void DeviceChannelWidget::reloadConfigList() {
+    if (!m_cbModel) return;
+    
+    QString currentFile = m_cbModel->currentText();
+    
+    m_cbModel->blockSignals(true);
+    m_cbModel->clear();
+    
+    QStringList configFiles = ConfigManager::getConfigFileList();
+    if (!configFiles.isEmpty()) {
+        m_cbModel->setEnabled(true);
+        m_cbModel->addItems(configFiles);
+        int idx = m_cbModel->findText(currentFile);
+        if (idx >= 0) m_cbModel->setCurrentIndex(idx);
+        else m_cbModel->setCurrentIndex(0);
+    } else {
+        m_cbModel->addItem("默认配置");
+        m_cbModel->setEnabled(false);
+    }
+    m_cbModel->blockSignals(false);
+    
+    // [修复] 不管之前选择的配置文件有没有改名，因为底层 JSON 内容极有可能已经被编辑并保存了
+    // 所以必须强制要求 ConfigManager 重新从硬盘把这个文件再读一遍，并强制刷新界面表格！
+    if (!m_cbModel->currentText().isEmpty() && m_cbModel->currentText() != "默认配置") {
+        m_config.loadConfig(m_cbModel->currentText());
+        resetUI();
+    }
+}
+
+// ====================================================================
+// [核心逻辑] 产能统计与超时强制中断机制
+// ====================================================================
+void DeviceChannelWidget::onTimeout() {
+    if (!m_isTesting || m_isDeviceFinished) return;
+    m_logView->appendPlainText(">>> [超时] 规定时间内未通过所有检测，强制结案为 NG！");
+    finishTest(false, true);
+}
+
+void DeviceChannelWidget::finishTest(bool isPass, bool isTimeout) {
+    if (!m_isTesting || m_isDeviceFinished) return; // 防重复进入
+    m_isDeviceFinished = true;      // [修改] 仅锁住当前这台设备的生命周期，坚决不关停串口监听！
+    m_timeoutTimer->stop();
+
+    if (isPass) {
+        setChannelStatus(true);
+        m_group->setTitle(QString("通道 %1 - [ ✔️ PASS ]").arg(m_id));
+        m_group->setStyleSheet("QGroupBox { border: 3px solid #4CAF50; font-weight: bold; margin-top: 1ex; background-color: #E8F5E9; } QGroupBox::title { color: #2E7D32; subcontrol-origin: margin; subcontrol-position: top center; }");
+    } else {
+        setChannelStatus(false);
+        QString titleStr = isTimeout ? QString("通道 %1 - [ ❌ NG (超时) ]").arg(m_id) : QString("通道 %1 - [ ❌ NG ]").arg(m_id);
+        m_group->setTitle(titleStr);
+        m_group->setStyleSheet("QGroupBox { border: 3px solid #F44336; font-weight: bold; margin-top: 1ex; background-color: #FFEBEE; } QGroupBox::title { color: #C62828; subcontrol-origin: margin; subcontrol-position: top center; }");
+    }
+
+    // [核心] FPY 履历追溯统计
+    // 提取当前身份作为主键：优先使用主板自己吐出的原生身份（如 IMEI:xxxx），保证同一块板子身份绝对唯一！
+    QString terminalId = m_editSerialRead->text().trimmed();
+    if (terminalId.isEmpty()) terminalId = m_editBarcode->text().trimmed(); // 万一没配身份规则，降级使用扫码框
+    if (terminalId.isEmpty()) terminalId = "UNKNOWN";
+
+    if (isPass) {
+        if (m_testHistory.contains(terminalId)) {
+            if (m_testHistory[terminalId] == false) {
+                // 原来是 NG，现在复测变 PASS
+                m_ngCount--;
+                m_passCount++;
+                m_testHistory[terminalId] = true;
+            }
+        } else {
+            m_passCount++;
+            m_testHistory[terminalId] = true;
+        }
+    } else {
+        if (!m_testHistory.contains(terminalId) || m_testHistory[terminalId] == true) {
+            // 如果原本是 PASS，复测变成了 NG，或者原本没有
+            if (m_testHistory.contains(terminalId) && m_testHistory[terminalId] == true) {
+                m_passCount--;
+            }
+            m_ngCount++;
+            m_testHistory[terminalId] = false;
+        }
+    }
+
+    updateStatsUI();
+    logYieldData(isPass, terminalId);
+
+    // [触发业务层扫码信号，给下一个设备用]
+    emit barcodeReturnPressed(m_id);
+}
+
+void DeviceChannelWidget::updateStatsUI() {
+    m_lbStats->setText(QString("✅ 成功: %1    ❌ 失败: %2").arg(m_passCount).arg(m_ngCount));
+    emit statsUpdated(); // 通知主界面
+}
+
+void DeviceChannelWidget::resetStats() {
+    if (QMessageBox::question(this, "确认", "是否要清空当前通道的产量统计数据？") == QMessageBox::Yes) {
+        m_passCount = 0;
+        m_ngCount = 0;
+        m_testHistory.clear();
+        updateStatsUI();
+        m_logView->appendPlainText(">>> 统计数据已手动清空。");
+    }
+}
+
+void DeviceChannelWidget::logYieldData(bool isPass, const QString &terminalId) {
+    QDate currentDate = QDate::currentDate();
+    QString dirPath = "stats_logs";
+    QDir().mkpath(dirPath);
+    QString fileName = QString("%1/Yield_CH%2_%3.csv").arg(dirPath).arg(m_id).arg(currentDate.toString("yyyyMMdd"));
+    
+    QFile file(fileName);
+    bool isNew = !file.exists();
+    if (file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        QTextStream out(&file);
+        if (isNew) {
+            out << "Timestamp,TerminalID,Result,TotalPass,TotalNG\n";
+        }
+        out << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << ","
+            << terminalId << ","
+            << (isPass ? "PASS" : "NG") << ","
+            << m_passCount << ","
+            << m_ngCount << "\n";
+        file.close();
+    }
+}
+
+void DeviceChannelWidget::loadStatsLog() {
+    // 从当天日志中恢复最后的计数状态
+    QDate currentDate = QDate::currentDate();
+    QString fileName = QString("stats_logs/Yield_CH%1_%2.csv").arg(m_id).arg(currentDate.toString("yyyyMMdd"));
+    QFile file(fileName);
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QString lastLine;
+        QTextStream in(&file);
+        while (!in.atEnd()) {
+            QString line = in.readLine();
+            if (!line.trimmed().isEmpty()) lastLine = line;
+        }
+        file.close();
+        
+        QStringList parts = lastLine.split(",");
+        if (parts.size() >= 5) {
+            m_passCount = parts[3].toInt();
+            m_ngCount = parts[4].toInt();
+            updateStatsUI();
+        }
     }
 }

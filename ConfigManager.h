@@ -68,14 +68,17 @@ public:
         }
 
         QJsonObject root = doc.object();
+        m_timeout = root.value("timeout").toInt(0); // 默认为0，表示不限制
         parseIdentityRules(root.value("identity_rules").toArray());
         parseTelemetryRules(root.value("telemetry_rules").toArray());
     }
 
     const QVector<IdentityRule>& getIdentityRules() const { return m_identities; }
     const QVector<TestRule>& getTelemetryRules() const { return m_telemetries; }
+    int getTimeout() const { return m_timeout; }
 
 private:
+    int m_timeout = 0;
     QVector<IdentityRule> m_identities;
     QVector<TestRule> m_telemetries;
 

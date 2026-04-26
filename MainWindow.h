@@ -11,6 +11,7 @@
 #include <QKeyEvent>
 #include <QElapsedTimer>
 #include "DeviceChannelWidget.h"
+#include "ConfigEditorDialog.h"
 
 class MainWindow : public QMainWindow
 {
@@ -29,6 +30,8 @@ private slots:
     void onChannelScanFinished(int currentId);
     void onChannelCleared(bool isGlobal); // [修改] 增加判定参数
     void processScanBuffer();
+    void reloadConfigsAllChannels(); // 收到配置编辑器更新通知后触发刷新
+    void updateGlobalStats(); // [新增] 更新全局统计标签
 
 private:
     QWidget *m_centralWidget;
@@ -40,6 +43,8 @@ private:
 
     QString m_scanBuffer;
     QTimer *m_scanProcessTimer; // [修改] 改为 QTimer 延时处理
+    
+    QLabel *m_lblGlobalStats; // [新增] 全局统计标签
 };
 
 #endif // MAINWINDOW_H

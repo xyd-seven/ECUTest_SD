@@ -51,10 +51,17 @@ public:
         if (m_editBarcode) m_editBarcode->clear();
     }
 
+    void reloadConfigList();
+    void resetStats();
+    
+    int getPassCount() const { return m_passCount; }
+    int getNgCount() const { return m_ngCount; }
+
 signals:
     void barcodeReturnPressed(int currentId);
     // [优化] 增加 bool 标志，区分是工装压下(全局清空) 还是 仅单一通道重置焦点
     void barcodeCleared(bool isGlobal);
+    void statsUpdated(); // [新增] 通知主窗口更新全局统计
 
 private slots:
     void onStartClicked();
@@ -64,6 +71,7 @@ private slots:
     // ================= [新增] =================
     void onSerialError(QSerialPort::SerialPortError error); // 处理串口异常断开
     void tryReconnect();                                    // 定时尝试重连
+    void onTimeout();                                       // 处理测试超时
     // ==========================================
 
 private:
@@ -76,10 +84,15 @@ private:
     void performComparison();
     void setChannelStatus(bool active);
     void updateSerialDisplay();
+    void finishTest(bool isPass, bool isTimeout);
+    void logYieldData(bool isPass, const QString &terminalId);
+    void loadStatsLog();
+    void updateStatsUI();
 
 private:
     int m_id;
-    bool m_isTesting = false;
+    bool m_isTesting = false;      // 表示通道串口是否已打开
+    bool m_isDeviceFinished = false; // 表示当前这台设备的测试生命周期是否已结束
     bool m_hasError = false;
 
     QSerialPort *m_serial;
@@ -106,6 +119,14 @@ private:
 
     // ================= [新增] =================
     QTimer *m_reconnectTimer;     // 自动重连定时器
+    
+    QTimer *m_timeoutTimer;       // 超时机制定时器
+    QLabel *m_lbStats;            // 统计展示标签
+    QPushButton *m_btnResetStats; // 独立清零按钮
+    
+    int m_passCount = 0;
+    int m_ngCount = 0;
+    QHash<QString, bool> m_testHistory; // 履历追溯表
     // ==========================================
 };
 
