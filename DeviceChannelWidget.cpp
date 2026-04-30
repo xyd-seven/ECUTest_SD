@@ -859,7 +859,6 @@ void DeviceChannelWidget::finishTest(bool isPass, bool isTimeout) {
   QStringList snapList;
   
   if (!isPass) {
-    if (isTimeout) ngReasons.append("等待超时(Timeout)");
     
     for (int i = 0; i < m_tableRes->rowCount(); i++) {
       for (int j = 1; j < 8; j += 2) {
