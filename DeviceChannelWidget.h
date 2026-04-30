@@ -62,6 +62,7 @@ signals:
     // [优化] 增加 bool 标志，区分是工装压下(全局清空) 还是 仅单一通道重置焦点
     void barcodeCleared(bool isGlobal);
     void statsUpdated(); // [新增] 通知主窗口更新全局统计
+    void ngReported(const QStringList &reasons); // [新增] 报告故障原因
 
 private slots:
     void onStartClicked();
@@ -85,7 +86,7 @@ private:
     void setChannelStatus(bool active);
     void updateSerialDisplay();
     void finishTest(bool isPass, bool isTimeout);
-    void logYieldData(bool isPass, const QString &terminalId);
+    void logYieldData(bool isPass, const QString &terminalId, const QString &ngReason = "", const QString &snapshot = "");
     void loadStatsLog();
     void updateStatsUI();
 

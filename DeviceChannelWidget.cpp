@@ -853,6 +853,42 @@ void DeviceChannelWidget::finishTest(bool isPass, bool isTimeout) {
         "subcontrol-origin: margin; subcontrol-position: top center; }");
   }
 
+  // [新增] 提取 NG 原因和快照
+  QStringList ngReasons;
+  QString snapshotDetail;
+  QStringList snapList;
+  
+  if (!isPass) {
+    if (isTimeout) ngReasons.append("等待超时(Timeout)");
+    
+    for (int i = 0; i < m_tableRes->rowCount(); i++) {
+      for (int j = 1; j < 8; j += 2) {
+        QTableWidgetItem *item = m_tableRes->item(i, j);
+        if (item && (item->text().startsWith("NG") || item->text() == "WAIT")) {
+          QTableWidgetItem *nameItem = m_tableRes->item(i, j - 1);
+          if (nameItem && !nameItem->text().isEmpty()) {
+            ngReasons.append(nameItem->text());
+          }
+        }
+      }
+    }
+    if (!ngReasons.isEmpty()) {
+      emit ngReported(ngReasons); // 发送给主窗口累计
+    }
+  }
+  
+  // 生成全局快照
+  for (int i = 0; i < m_tableRes->rowCount(); i++) {
+    for (int j = 1; j < 8; j += 2) {
+      QTableWidgetItem *valItem = m_tableRes->item(i, j);
+      QTableWidgetItem *nameItem = m_tableRes->item(i, j - 1);
+      if (valItem && nameItem && !nameItem->text().isEmpty()) {
+        snapList.append(QString("[%1:%2]").arg(nameItem->text()).arg(valItem->text()));
+      }
+    }
+  }
+  snapshotDetail = snapList.join("");
+
   // [核心] FPY 履历追溯统计
   // 提取当前身份作为主键：优先使用主板自己吐出的原生身份（如
   // IMEI:xxxx），保证同一块板子身份绝对唯一！
@@ -889,7 +925,7 @@ void DeviceChannelWidget::finishTest(bool isPass, bool isTimeout) {
   }
 
   updateStatsUI();
-  logYieldData(isPass, terminalId);
+  logYieldData(isPass, terminalId, ngReasons.join("; "), snapshotDetail);
 
   // [触发业务层扫码信号，给下一个设备用]
   emit barcodeReturnPressed(m_id);
@@ -913,8 +949,10 @@ void DeviceChannelWidget::resetStats() {
   }
 }
 
-void DeviceChannelWidget::logYieldData(bool isPass, const QString &terminalId) {
+void DeviceChannelWidget::logYieldData(bool isPass, const QString &terminalId, const QString &ngReason, const QString &snapshot) {
   QDate currentDate = QDate::currentDate();
+  
+  // 1. 保留原本的短日志
   QString dirPath = "stats_logs";
   QDir().mkpath(dirPath);
   QString fileName = QString("%1/Yield_CH%2_%3.csv")
@@ -933,6 +971,32 @@ void DeviceChannelWidget::logYieldData(bool isPass, const QString &terminalId) {
         << terminalId << "," << (isPass ? "PASS" : "NG") << "," << m_passCount
         << "," << m_ngCount << "\n";
     file.close();
+  }
+
+  // 2. [新增] 详细追溯长日志
+  QString traceDir = "trace_logs";
+  QDir().mkpath(traceDir);
+  QString traceFileName = QString("%1/Trace_CH%2_%3.csv")
+                              .arg(traceDir)
+                              .arg(m_id)
+                              .arg(currentDate.toString("yyyyMMdd"));
+
+  QFile traceFile(traceFileName);
+  bool isTraceNew = !traceFile.exists();
+  if (traceFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+    QTextStream out(&traceFile);
+    if (isTraceNew) {
+      out << "Timestamp,Channel,TerminalID,Result,IsRetest,FailureReason,Snapshot\n";
+    }
+    bool isRetest = m_testHistory.contains(terminalId);
+    out << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << ","
+        << m_id << ","
+        << terminalId << ","
+        << (isPass ? "PASS" : "NG") << ","
+        << (isRetest ? "Yes" : "No") << ","
+        << ngReason << ","
+        << snapshot << "\n";
+    traceFile.close();
   }
 }
 

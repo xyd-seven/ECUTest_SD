@@ -32,6 +32,8 @@ private slots:
     void processScanBuffer();
     void reloadConfigsAllChannels(); // 收到配置编辑器更新通知后触发刷新
     void updateGlobalStats(); // [新增] 更新全局统计标签
+    void onNgReported(const QStringList &reasons); // [新增] 收集某个通道报上来的NG原因
+    void showNgStatsDialog(); // [新增] 显示NG排行榜对话框
 
 private:
     QWidget *m_centralWidget;
@@ -45,6 +47,8 @@ private:
     QTimer *m_scanProcessTimer; // [修改] 改为 QTimer 延时处理
     
     QLabel *m_lblGlobalStats; // [新增] 全局统计标签
+    
+    QMap<QString, int> m_globalNgReasons; // [新增] 全局 NG 故障频次统计库
 };
 
 #endif // MAINWINDOW_H

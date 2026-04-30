@@ -4,6 +4,12 @@
 #include <QTimer>
 #include <QtGlobal>
 #include <cmath>
+#include <QDialog>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QProgressBar>
+#include <QVBoxLayout>
+#include <algorithm>
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   resize(1280, 768);
@@ -45,6 +51,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   });
 
   toolbar->addSeparator();
+  QPushButton *btnNgStats = new QPushButton("📊 NG 故障分析", this);
+  btnNgStats->setFont(QFont("Microsoft YaHei", 10, QFont::Bold));
+  btnNgStats->setFocusPolicy(Qt::NoFocus);
+  toolbar->addWidget(btnNgStats);
+  connect(btnNgStats, &QPushButton::clicked, this, &MainWindow::showNgStatsDialog);
+
+  toolbar->addSeparator();
   QPushButton *btnClearAllStats = new QPushButton("🧹 清空所有产能数据", this);
   btnClearAllStats->setFont(QFont("Microsoft YaHei", 10, QFont::Bold));
   btnClearAllStats->setStyleSheet("color: #E65100;");
@@ -60,6 +73,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         if (channel)
           channel->resetStats();
       }
+      m_globalNgReasons.clear();
     }
   });
 
@@ -118,6 +132,8 @@ void MainWindow::onChannelCountChanged(int count) {
             &MainWindow::onChannelCleared);
     connect(w, &DeviceChannelWidget::statsUpdated, this,
             &MainWindow::updateGlobalStats);
+    connect(w, &DeviceChannelWidget::ngReported, this,
+            &MainWindow::onNgReported);
 
     m_channels.append(w);
 
@@ -289,4 +305,70 @@ void MainWindow::updateGlobalStats() {
   m_lblGlobalStats->setText(QString("【全局总计】✅ 成功: %1    ❌ 失败: %2")
                                 .arg(totalPass)
                                 .arg(totalNg));
+}
+
+void MainWindow::onNgReported(const QStringList &reasons) {
+  for (const QString &r : reasons) {
+    m_globalNgReasons[r]++;
+  }
+}
+
+void MainWindow::showNgStatsDialog() {
+  QDialog dlg(this);
+  dlg.setWindowTitle("今日 NG 故障频次排行榜");
+  dlg.resize(500, 400);
+  QVBoxLayout *layout = new QVBoxLayout(&dlg);
+  
+  QTableWidget *table = new QTableWidget();
+  table->setColumnCount(3);
+  table->setHorizontalHeaderLabels({"故障原因 (NG Item)", "累计发生频次", "占比分析"});
+  table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+  table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+  table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+  table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  table->setSelectionMode(QAbstractItemView::NoSelection);
+  
+  int totalNgItems = 0;
+  for (int count : m_globalNgReasons.values()) totalNgItems += count;
+  
+  QList<QPair<QString, int>> sortedList;
+  for (auto it = m_globalNgReasons.begin(); it != m_globalNgReasons.end(); ++it) {
+    sortedList.append(qMakePair(it.key(), it.value()));
+  }
+  std::sort(sortedList.begin(), sortedList.end(), [](const QPair<QString, int>& a, const QPair<QString, int>& b){
+    return a.second > b.second;
+  });
+  
+  table->setRowCount(sortedList.size());
+  for (int i = 0; i < sortedList.size(); ++i) {
+    QString rankStr;
+    if (i == 0) rankStr = "🥇 " + sortedList[i].first;
+    else if (i == 1) rankStr = "🥈 " + sortedList[i].first;
+    else if (i == 2) rankStr = "🥉 " + sortedList[i].first;
+    else rankStr = QString::number(i + 1) + ". " + sortedList[i].first;
+    
+    QTableWidgetItem *item0 = new QTableWidgetItem(rankStr);
+    QTableWidgetItem *item1 = new QTableWidgetItem(QString::number(sortedList[i].second) + " 次");
+    item1->setTextAlignment(Qt::AlignCenter);
+    
+    table->setItem(i, 0, item0);
+    table->setItem(i, 1, item1);
+    
+    int percent = totalNgItems > 0 ? (sortedList[i].second * 100 / totalNgItems) : 0;
+    QProgressBar *bar = new QProgressBar();
+    bar->setRange(0, 100);
+    bar->setValue(percent);
+    bar->setAlignment(Qt::AlignCenter);
+    bar->setStyleSheet("QProgressBar { border: 1px solid grey; border-radius: 2px; text-align: center; color: black; font-weight: bold; } "
+                       "QProgressBar::chunk { background-color: #EF5350; }");
+    table->setCellWidget(i, 2, bar);
+  }
+  
+  layout->addWidget(table);
+  
+  QPushButton *btnClose = new QPushButton("关闭");
+  connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::accept);
+  layout->addWidget(btnClose);
+  
+  dlg.exec();
 }
