@@ -16,6 +16,7 @@
 #include <QDateTime>
 #include <QFile>
 #include <QDir>
+#include <QJSEngine>
 #include "ConfigManager.h"
 
 enum class ScanResult {
@@ -78,10 +79,11 @@ private slots:
 private:
     void setupUi();
     void resetUI(bool isGlobal = false); // [修改这行] 增加 isGlobal 参数
+    void initScriptEngine(); // [新增] 初始化 JS 引擎
     void processBuffer();
     void parseLine(const QString &line);
     void parseTelemetry(const QString &dataPart);
-    void updateResultItem(const QString &key, const QString &val);
+    void updateResultItem(const QString &key, const QString &val, int fatOverride = 0); // fatOverride: 0=none, 1=pass, -1=fail
     void performComparison();
     void setChannelStatus(bool active);
     void updateSerialDisplay();
@@ -117,6 +119,7 @@ private:
 
     // [优化] 通道独立持有 ConfigManager，消除配置串扰
     ConfigManager m_config;
+    QJSEngine *m_jsEngine = nullptr; // [新增] 专属脚本引擎
 
     // ================= [新增] =================
     QTimer *m_reconnectTimer;     // 自动重连定时器

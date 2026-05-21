@@ -12,6 +12,8 @@
 #include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QJSValue>
+#include <QRegularExpression>
 
 
 DeviceChannelWidget::DeviceChannelWidget(int id, QWidget *parent)
@@ -50,7 +52,6 @@ void DeviceChannelWidget::setupUi() {
   } else {
     m_cbModel->addItems(configFiles);
     m_cbModel->setCurrentIndex(0);
-    m_config.loadConfig(m_cbModel->currentText()); // 使用本地配置
   }
   m_cbModel->setMinimumWidth(150);
   m_cbModel->setMaximumWidth(300);
@@ -222,6 +223,7 @@ void DeviceChannelWidget::setupUi() {
             settings.setValue(QString("Channel_%1/Model").arg(m_id), fileName);
             m_logView->appendPlainText(QString(">>> Load: %1").arg(fileName));
             m_config.loadConfig(fileName); // 使用本地配置
+            initScriptEngine(); // [新增] 切换下拉框时初始化脚本引擎
             resetUI();
           });
 
@@ -246,6 +248,13 @@ void DeviceChannelWidget::setupUi() {
     m_logView->clear();
     resetUI(true); // [修改] 只有人工点击清空，才触发全局焦点重置
   });
+
+  // [新增] 启动时根据最终选中的机型，统一加载配置并渲染界面
+  if (m_cbModel->currentText() != "默认配置") {
+      m_config.loadConfig(m_cbModel->currentText());
+      initScriptEngine();
+  }
+  resetUI(true);
 }
 
 void DeviceChannelWidget::resetUI(bool isGlobal) {
@@ -362,13 +371,78 @@ void DeviceChannelWidget::parseLine(const QString &line) {
   if (!m_isTesting)
     return;
 
-  if (line.contains("$info,")) {
-    if (m_isDeviceFinished)
-      return; // [新增] 如果设备已结案，拒收后续延迟发来的冗余参数
+  // ==========================================
+  // [新增] 路由到脚本引擎 (双轨制：胖/瘦模式兼容)
+  // ==========================================
+  bool anyUpdate = false;
+  if (m_jsEngine) {
+    QJSValue func = m_jsEngine->globalObject().property("parseData");
+    if (func.isCallable()) {
+      QJSValueList args;
+      args << line;
+      QJSValue result = func.call(args);
+      
+      if (result.isError()) {
+         m_logView->appendPlainText(QString(">>> JS执行错误: %1").arg(result.toString()));
+      } else if (result.isString()) {
+         QString jsonStr = result.toString();
+         QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8());
+         if (doc.isArray()) {
+             QJsonArray arr = doc.array();
+             for (int i=0; i<arr.size(); i++) {
+                 QJsonObject obj = arr[i].toObject();
+                 QString key = obj.value("key").toString();
+                 QString res = obj.value("result").toString();
+                 QString val = obj.value("val").toString();
+                 
+                 if (!key.isEmpty()) {
+                     if (!res.isEmpty()) {
+                         if (res.compare("PASS", Qt::CaseInsensitive) == 0) {
+                             updateResultItem(key, val.isEmpty() ? "OK" : val, 1);
+                         } else {
+                             updateResultItem(key, val.isEmpty() ? "NG" : val, -1);
+                         }
+                     } else if (!val.isEmpty()) {
+                         updateResultItem(key, val, 0);
+                     }
+                     anyUpdate = true;
+                 }
+             }
+             if (anyUpdate) performComparison();
+         }
+      }
+    }
+  }
+  
+  if (!anyUpdate) {
+    bool regexMatched = false;
+    for (const auto &rule : m_config.getTelemetryRules()) {
+        if (!rule.extractRegex.isEmpty()) {
+            QRegularExpression re(rule.extractRegex);
+            QRegularExpressionMatch match = re.match(line);
+            if (match.hasMatch()) {
+                QString val = match.captured(1);
+                updateResultItem(rule.key, val);
+                regexMatched = true;
+            }
+        }
+    }
+    
+    if (regexMatched) {
+        performComparison();
+    } else {
+        QString prefix = m_config.getTelemetryPrefix();
+        if (prefix.isEmpty()) {
+            parseTelemetry(line);
+        } else if (line.contains(prefix)) {
+            if (m_isDeviceFinished)
+                return;
 
-    int start = line.indexOf("$info,");
-    parseTelemetry(line.mid(start + 6));
-    return;
+            int start = line.indexOf(prefix);
+            parseTelemetry(line.mid(start + prefix.length()));
+            return;
+        }
+    }
   }
 
   if (line.trimmed().startsWith("@") && line.trimmed().endsWith("#"))
@@ -544,7 +618,8 @@ DeviceChannelWidget::~DeviceChannelWidget() {
 }
 
 void DeviceChannelWidget::updateResultItem(const QString &key,
-                                           const QString &val) {
+                                           const QString &val,
+                                           int fatOverride) {
   if (!m_mapResRow.contains(key))
     return;
   int index = m_mapResRow[key];
@@ -559,6 +634,21 @@ void DeviceChannelWidget::updateResultItem(const QString &key,
   if (index >= rules.size())
     return;
   TestRule rule = rules[index];
+
+  // 如果有 JS 胖模式的强行干预，无视任何界面配置！
+  if (fatOverride == 1) {
+    item->setText(val == "OK" ? "OK" : QString("OK(%1)").arg(val));
+    item->setBackground(QBrush(Qt::white));
+    item->setForeground(QBrush(QColor(0, 150, 0)));
+    item->setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
+    return;
+  } else if (fatOverride == -1) {
+    item->setText(val == "NG" ? "NG" : QString("NG(%1)").arg(val));
+    item->setBackground(QBrush(QColor(255, 0, 0)));
+    item->setForeground(QBrush(Qt::white));
+    item->setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
+    return;
+  }
 
   if (rule.type == Type_Display) {
     item->setText(val);
@@ -812,7 +902,41 @@ void DeviceChannelWidget::reloadConfigList() {
   if (!m_cbModel->currentText().isEmpty() &&
       m_cbModel->currentText() != "默认配置") {
     m_config.loadConfig(m_cbModel->currentText());
+    initScriptEngine(); // [新增] 加载配置后初始化脚本引擎
     resetUI();
+  }
+}
+
+// ====================================================================
+// [新增] 脚本引擎挂载逻辑
+// ====================================================================
+void DeviceChannelWidget::initScriptEngine() {
+  if (m_jsEngine) {
+    delete m_jsEngine;
+    m_jsEngine = nullptr;
+  }
+  
+  if (m_config.isScriptMode() && !m_config.getScriptPath().isEmpty()) {
+    QString scriptFile = QString("configs/%1").arg(m_config.getScriptPath());
+    QFile file(scriptFile);
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+      QString scriptContent = file.readAll();
+      file.close();
+      
+      m_jsEngine = new QJSEngine(this);
+      QJSValue result = m_jsEngine->evaluate(scriptContent);
+      if (result.isError()) {
+        m_logView->appendPlainText(QString(">>> JS脚本加载失败: %1 行 %2")
+                                   .arg(result.toString())
+                                   .arg(result.property("lineNumber").toInt()));
+        delete m_jsEngine;
+        m_jsEngine = nullptr;
+      } else {
+        m_logView->appendPlainText(QString(">>> JS外部脚本引擎已挂载: %1").arg(m_config.getScriptPath()));
+      }
+    } else {
+      m_logView->appendPlainText(QString(">>> 错误: 找不到 JS 脚本文件 %1").arg(scriptFile));
+    }
   }
 }
 

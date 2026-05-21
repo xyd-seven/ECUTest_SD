@@ -176,3 +176,6 @@ ECUTest_SD.pro
 init_env.ps1
 build.ps1
 .clangd
+
+# JS文件
+*.js

@@ -77,6 +77,36 @@ void ConfigEditorDialog::setupUi()
     
     rightLayout->addLayout(topEditLayout);
 
+    // [新增] 数据流规则与脚本挂载配置
+    QHBoxLayout *streamLayout = new QHBoxLayout();
+    streamLayout->addWidget(new QLabel("数据包前缀:"));
+    m_editPrefix = new QLineEdit();
+    m_editPrefix->setPlaceholderText("留空为全行扫描 (默认: $info,)");
+    m_editPrefix->setMaximumWidth(150);
+    streamLayout->addWidget(m_editPrefix);
+    
+    streamLayout->addSpacing(20);
+    m_chkScript = new QCheckBox("启用外部 JS 解析脚本");
+    streamLayout->addWidget(m_chkScript);
+    
+    m_editScriptPath = new QLineEdit();
+    m_editScriptPath->setPlaceholderText("脚本名(如 parser.js，需放在 configs/ 下)");
+    m_editScriptPath->setEnabled(false);
+    
+    // [新增] 悬浮提示说明数据格式
+    QString jsHelp = "脚本需包含函数 parseData(line)，并返回 JSON 字符串数组。\n"
+                     "支持两种模式：\n"
+                     "1. 胖模式(直接裁判): [{\"key\": \"t1\", \"val\": \"3.3V\", \"result\": \"PASS\"}]\n"
+                     "2. 瘦模式(仅提数据): [{\"key\": \"t1\", \"val\": \"3.3V\"}] (交由左侧判定模式裁决)";
+    m_chkScript->setToolTip(jsHelp);
+    m_editScriptPath->setToolTip(jsHelp);
+    
+    streamLayout->addWidget(m_editScriptPath);
+    
+    connect(m_chkScript, &QCheckBox::toggled, m_editScriptPath, &QLineEdit::setEnabled);
+    
+    rightLayout->addLayout(streamLayout);
+
     QTabWidget *tabWidget = new QTabWidget();
 
     // ------- Tab 1: 扫码比对规则 (Identity) -------
@@ -103,11 +133,16 @@ void ConfigEditorDialog::setupUi()
     // ------- Tab 2: 物理检测项规则 (Telemetry) -------
     QWidget *tabTelemetry = new QWidget();
     QVBoxLayout *layTele = new QVBoxLayout(tabTelemetry);
-    m_tableTelemetry = new QTableWidget(0, 5);
-    m_tableTelemetry->setHorizontalHeaderLabels({"使能", "检测项(Key)", "显示名称", "判定模式", "参数(Target/Min/Max)"});
+    m_tableTelemetry = new QTableWidget(0, 6);
+    m_tableTelemetry->setHorizontalHeaderLabels({"使能", "检测项(Key)", "显示名称", "判定模式", "参数(Target/Min/Max)", "提取正则(可选)"});
     m_tableTelemetry->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_tableTelemetry->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_tableTelemetry->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    
+    // [新增] 表头悬浮提示说明正则用法
+    if (m_tableTelemetry->horizontalHeaderItem(5)) {
+        m_tableTelemetry->horizontalHeaderItem(5)->setToolTip("使用小括号 () 提取数值，如：T1=([0-9.]+)\n提取出的数值将交由前面的判定模式进行评估。");
+    }
     
     QHBoxLayout *layOpTele = new QHBoxLayout();
     QPushButton *btnAddTele = new QPushButton("➕ 增加检测项");
@@ -188,6 +223,9 @@ void ConfigEditorDialog::clearEditors()
     m_tableIdentity->setRowCount(0);
     m_tableTelemetry->setRowCount(0);
     m_spinTimeout->setValue(0);
+    m_editPrefix->setText("$info,");
+    m_chkScript->setChecked(false);
+    m_editScriptPath->clear();
 }
 
 void ConfigEditorDialog::loadJsonToEditors(const QString &fileName)
@@ -210,8 +248,11 @@ void ConfigEditorDialog::loadJsonToEditors(const QString &fileName)
 
     QJsonObject root = doc.object();
 
-    // 加载超时时间
+    // 加载全局配置
     m_spinTimeout->setValue(root.value("timeout").toInt(0));
+    m_editPrefix->setText(root.value("telemetry_prefix").toString("$info,"));
+    m_chkScript->setChecked(root.value("is_script_mode").toBool(false));
+    m_editScriptPath->setText(root.value("script_path").toString(""));
 
     // 1. Identity Rules
     QJsonArray idArr = root.value("identity_rules").toArray();
@@ -266,6 +307,9 @@ void ConfigEditorDialog::loadJsonToEditors(const QString &fileName)
                 edit->setText(targetVal);
             }
         }
+        
+        // [新增] 提取正则
+        m_tableTelemetry->item(i, 5)->setText(obj.value("extract_regex").toString());
     }
 }
 
@@ -294,6 +338,7 @@ void ConfigEditorDialog::addTelemetryRow()
     
     m_tableTelemetry->setItem(row, 1, new QTableWidgetItem("t1"));
     m_tableTelemetry->setItem(row, 2, new QTableWidgetItem("测试项"));
+    m_tableTelemetry->setItem(row, 5, new QTableWidgetItem("")); // [新增] 提取正则
     
     // [修复] 采用自定义无滚轮下拉框替代原生下拉框
     NoScrollComboBox *cbType = new NoScrollComboBox();
@@ -390,6 +435,9 @@ QJsonObject ConfigEditorDialog::saveEditorsToJson()
 {
     QJsonObject root;
     root["timeout"] = m_spinTimeout->value();
+    root["telemetry_prefix"] = m_editPrefix->text().trimmed();
+    root["is_script_mode"] = m_chkScript->isChecked();
+    root["script_path"] = m_editScriptPath->text().trimmed();
     
     QJsonArray idArr;
     for (int i = 0; i < m_tableIdentity->rowCount(); i++) {
@@ -436,6 +484,9 @@ QJsonObject ConfigEditorDialog::saveEditorsToJson()
             QLineEdit *edit = paramWidget->findChild<QLineEdit*>();
             if (edit) obj["target"] = edit->text();
         }
+        
+        // [新增] 提取正则
+        obj["extract_regex"] = m_tableTelemetry->item(i, 5)->text().trimmed();
         
         if(!obj["key"].toString().isEmpty()) teleArr.append(obj);
     }

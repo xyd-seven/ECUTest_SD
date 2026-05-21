@@ -62,6 +62,9 @@ private:
     QTableWidget *m_tableIdentity;
     QTableWidget *m_tableTelemetry;
     QSpinBox *m_spinTimeout;
+    QLineEdit *m_editPrefix;      // [新增]
+    QCheckBox *m_chkScript;       // [新增]
+    QLineEdit *m_editScriptPath;  // [新增]
 
     QPushButton *m_btnSave;
     QString m_baseDir = "configs";

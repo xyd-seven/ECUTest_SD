@@ -28,6 +28,7 @@ struct TestRule {
     double minVal;
     double maxVal;
     bool enable;
+    QString extractRegex; // [新增] 用于直接从原码提取数值的正则
 };
 
 class ConfigManager {
@@ -69,6 +70,10 @@ public:
 
         QJsonObject root = doc.object();
         m_timeout = root.value("timeout").toInt(0); // 默认为0，表示不限制
+        m_telemetryPrefix = root.value("telemetry_prefix").toString("$info,"); // [新增]
+        m_isScriptMode = root.value("is_script_mode").toBool(false); // [新增]
+        m_scriptPath = root.value("script_path").toString(""); // [新增]
+        
         parseIdentityRules(root.value("identity_rules").toArray());
         parseTelemetryRules(root.value("telemetry_rules").toArray());
     }
@@ -76,9 +81,16 @@ public:
     const QVector<IdentityRule>& getIdentityRules() const { return m_identities; }
     const QVector<TestRule>& getTelemetryRules() const { return m_telemetries; }
     int getTimeout() const { return m_timeout; }
+    QString getTelemetryPrefix() const { return m_telemetryPrefix; }
+    bool isScriptMode() const { return m_isScriptMode; }
+    QString getScriptPath() const { return m_scriptPath; }
 
 private:
     int m_timeout = 0;
+    QString m_telemetryPrefix = "$info,";
+    bool m_isScriptMode = false;
+    QString m_scriptPath = "";
+    
     QVector<IdentityRule> m_identities;
     QVector<TestRule> m_telemetries;
 
@@ -130,6 +142,7 @@ private:
                 if(rule.targetVal.isEmpty() && obj.contains("target"))
                     rule.targetVal = QString::number(obj.value("target").toDouble());
             }
+            rule.extractRegex = obj.value("extract_regex").toString(); // [新增] 提取正则
             m_telemetries.append(rule);
         }
     }
